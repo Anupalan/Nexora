@@ -118,7 +118,7 @@ Back up secrets separately, encrypted, with restricted recovery access.
 - **Slots must match the node.** Measure a node's real parallelism first (send N identical requests concurrently: if the
   total is about N times one request, it is serial). Set each deployment's `max_active_requests` to that number. If it
   is larger than Ollama really runs, requests queue inside Ollama where lanes cannot reorder them. DGX 1 measured serial
-  (parallelism 1) for the 8B model on 9 Nov 2026; DGX 2 has not been measured.
+  (parallelism 1) for the 8B model on 9 Nov 2026, and DGX 2 measured the same (8 Nov 2026, 8B model, 1/2/4 concurrent).
 - **What lanes cannot do:** they never interrupt a running request, so with one slot a chat request waits for the current
   request to finish (seconds for chat-sized work, longer for very long generations). Keep extraction requests
   reasonably sized, or raise `OLLAMA_NUM_PARALLEL` for true reserved capacity.

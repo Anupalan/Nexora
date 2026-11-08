@@ -140,7 +140,9 @@ capacity: a burst of 8 extraction-sized requests with chat requests arriving dur
 
 Chat was no longer stuck behind the extraction queue, and extraction throughput did not drop.
 
-Not yet measured: the 30B model's cold-load time, DGX 2's parallelism, long-context behavior near the 64k limit,
+**DGX 2 measured the same way (8 November 2026, with the owner's agreement, 8B model already resident, 64 output tokens per request, nothing loaded or unloaded):** 1 request took 1.5 s, 2 concurrent took 2.97 s, and 4 concurrent took 5.84 s, a steady 43 tokens/s in aggregate. That is also **effectively serial (parallelism 1)**, so both nodes need `max_active_requests` = 1 for now.
+
+Not yet measured: the 30B model's cold-load time, long-context behavior near the 64k limit,
 tool calling, and the `ollama_chat/` adapter.
 
 What this means for the plan:
@@ -171,7 +173,7 @@ What this means for the plan:
     and whether those fit alongside the resident ones. Which build of each model is the correct one
     (DGX 1's or DGX 2's digest; DGX 2 is probably the reference since extraction runs there), given extraction results may depend on it?
 2.  Remaining Ollama settings: `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`, and whether to raise
-    `OLLAMA_NUM_PARALLEL` (DGX 1 measured at an effective parallelism of 1; DGX 2 not measured). Context 65,536
+    `OLLAMA_NUM_PARALLEL` (both nodes measured at an effective parallelism of 1). Context 65,536
     and an 8-hour default keep-alive are known.
     Versions `0.40.2` (DGX 1) and `0.40.5` (DGX 2) are confirmed.
 3.  Whether the document-extraction service can be repointed at the gateway, and its current volume,
