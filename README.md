@@ -52,8 +52,21 @@ request is routed at admission to the deployment expected to serve it soonest:
   everywhere instantly. Manage it all from the admin **Routing** page or `/admin/nodes`, `/admin/deployments`,
   `/admin/routing/*`. Two-node Ollama setup: `infra/litellm/config.ollama.yaml`.
 
-Verified on two real DGX nodes (see roadmap §1.2). Not built yet: latency-aware scoring, workload lanes with
-reserved capacity, warm-up/keep-alive management, canary rollout, recommendations and the simulator.
+**Workload lanes.** Assign a class (`pms`, `coding`, `extraction`, or the default `standard`) to a project or an API key
+(super admin only; a key's class wins; clients cannot choose). Each class reserves a share of every deployment's slots
+(default 50/25/25, editable on the Routing page). A free slot goes first to a class still under its reservation, then by
+priority (extraction first), then by age; order inside a class stays FIFO. Idle reserved slots can be borrowed, but not
+those of a class active in the last `borrow_idle_after_s` seconds, and never so many that every slot is held. Running
+requests are not preempted. Measured on a real node: a chat request arriving during an extraction burst waited 17.2 s
+with lanes off and under 1 s with lanes on, with no loss of extraction throughput.
+
+**Match slots to Ollama's parallelism.** DGX 1 was measured running one request at a time (4 or 8 concurrent requests took
+the same total time as running them serially). Set each deployment's `max_active_requests` to the node's real parallelism
+(1 there today) so waiting happens in Nexora, where lanes can order it, not invisibly inside Ollama; raise
+`OLLAMA_NUM_PARALLEL` on the node (costs memory per slot) if you want true reserved capacity instead of boundary priority.
+
+Verified on two real DGX nodes (see roadmap §1.2). Not built yet: latency-aware scoring, warm-up/keep-alive management,
+canary rollout, recommendations and the simulator.
 
 ## Phase 4 status (admin analytics and operations)
 Done: admin overview (active developers, requests, tokens, queue, failures, time to first token,

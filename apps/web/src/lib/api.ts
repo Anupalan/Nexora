@@ -12,6 +12,7 @@ export interface User {
 export interface Team { id: string; name: string; status: string; created_at: string }
 export interface Project {
   id: string; team_id: string; name: string; description: string | null; status: string; created_at: string;
+  workload_class: string | null;
 }
 export interface AuditLog {
   id: string; actor_id: string | null; action: string; entity_type: string;
@@ -57,7 +58,7 @@ export interface ModelInfo {
 export interface ApiKeyInfo {
   id: string; name: string; key_prefix: string; allowed_models: string[]; project_id: string | null;
   rpm_limit: number | null; tpm_limit: number | null; expires_at: string | null; status: string;
-  last_used_at: string | null; created_at: string;
+  last_used_at: string | null; created_at: string; workload_class: string | null;
 }
 export interface ApiKeyCreated extends ApiKeyInfo { key: string }
 
@@ -69,9 +70,10 @@ export interface UsageReport {
   totals: UsageBucket & { avg_queue_ms: number | null; avg_ttft_ms: number | null };
   by_day: (UsageBucket & { date: string })[];
   by_model: (UsageBucket & { model: string })[];
+  by_class: (UsageBucket & { workload_class: string })[];
 }
 export interface HistoryRow {
-  id: string; model: string; source: string; status: string; input_tokens: number | null;
+  id: string; model: string; source: string; workload_class: string; status: string; input_tokens: number | null;
   output_tokens: number | null; queue_time_ms: number | null; duration_ms: number | null;
   error_code: string | null; created_at: string;
 }
@@ -114,6 +116,10 @@ export interface DeploymentRow {
   litellm_model: string; runtime_model: string | null; weight: number; enabled: boolean; draining: boolean;
   health: string; resident: boolean | null; digest: string | null; context_limit: number | null;
   max_active: number; max_queue: number; queued: number; active: number; strategy: string; frozen: boolean;
+  classes: Record<string, { reserved: number; active: number; queued: number }>;
+}
+export interface WorkloadConfig {
+  classes: Record<string, { reserved_pct: number; priority: number }>; borrow_idle_after_s: number;
 }
 export interface PolicyRow {
   id: string; model_id: string | null; version: number; strategy: string; status: string;

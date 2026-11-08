@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
-import { api, ApiError, type DecisionRow, type DeploymentRow, type NodeRow, type PolicyRow } from "@/lib/api";
+import { api, ApiError, type DecisionRow, type DeploymentRow, type NodeRow, type PolicyRow, type WorkloadConfig } from "@/lib/api";
 import { useUser } from "@/lib/session";
 import { Badge, EmptyState, Err, Loading, PageHeader } from "@/components/ui";
 import { IconRoute } from "@/components/icons";
@@ -19,6 +19,7 @@ export default function Routing() {
   const [policies, setPolicies] = useState<PolicyRow[]>([]);
   const [frozen, setFrozen] = useState(false);
   const [decisions, setDecisions] = useState<DecisionRow[]>([]);
+  const [wl, setWl] = useState<WorkloadConfig | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -28,6 +29,7 @@ export default function Routing() {
     api<{ frozen: boolean; policies: PolicyRow[] }>("/admin/routing/status")
       .then((s) => { setFrozen(s.frozen); setPolicies(s.policies); }).catch(() => {});
     api<DecisionRow[]>("/admin/routing/decisions?limit=25").then(setDecisions).catch(() => {});
+    api<WorkloadConfig>("/admin/workload-classes").then((c) => setWl((cur) => cur ?? c)).catch(() => {});
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
@@ -77,13 +79,14 @@ export default function Routing() {
       <div className="card flush">
         {deps === null ? <Loading /> : deps.length === 0 ? <EmptyState icon={<IconRoute />} title="No deployments" /> : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Deployment</th><th>Health</th><th>Model loaded</th><th>Queued</th><th>Running</th><th>Weight</th><th>Build</th><th /></tr></thead>
+            <thead><tr><th>Deployment</th><th>Health</th><th>Model loaded</th><th>Queued</th><th>Running</th><th>Lanes (running/reserved)</th><th>Weight</th><th>Build</th><th /></tr></thead>
             <tbody>{deps.map((d) => (
               <tr key={d.id}>
                 <td><b>{d.name}</b><div className="muted">{d.model}{d.node ? ` · ${d.node}` : ""}</div></td>
                 <td>{!d.enabled ? <Badge value="disabled" /> : d.draining ? <Badge value="draining" tone="warn" /> : <Badge value={d.health} />}</td>
                 <td>{d.resident === null ? <span className="muted">unknown</span> : d.resident ? <Badge value="loaded" tone="ok" /> : <Badge value="cold" tone="warn" />}</td>
                 <td>{d.queued}</td><td>{d.active} / {d.max_active}</td>
+                <td className="muted" style={{ whiteSpace: "normal" }}>{Object.entries(d.classes ?? {}).filter(([, v]) => v.reserved || v.active || v.queued).map(([k, v]) => <span key={k} style={{ marginRight: 10 }}>{k} <b>{v.active}/{v.reserved}</b>{v.queued ? ` (+${v.queued} waiting)` : ""}</span>)}</td>
                 <td>{d.weight}{" "}<button className="ghost sm" onClick={() => { const v = prompt("Weight (0 stops routing here)", String(d.weight)); if (v !== null && v !== "") run(() => api(`/admin/deployments/${d.id}`, { method: "PATCH", json: { weight: Number(v) } })); }}>Edit</button></td>
                 <td className="muted"><code>{d.digest ?? "—"}</code></td>
                 <td className="actions"><span className="actions-inline">
@@ -92,6 +95,39 @@ export default function Routing() {
               </tr>
             ))}</tbody>
           </table></div>
+        )}
+      </div>
+
+      <h2 className="section">Workload classes</h2>
+      <div className="card form-card">
+        <p className="muted" style={{ marginTop: 0 }}>
+          Each class reserves a share of every deployment&apos;s slots. A class under its reservation gets the next free slot;
+          otherwise lower priority numbers go first (extraction = 1). Idle reserved slots can be borrowed unless the
+          class was active within the window below. Assign a class to a project or key on those pages.
+        </p>
+        {wl && (
+          <form onSubmit={(e: FormEvent<HTMLFormElement>) => {
+            e.preventDefault();
+            const f = new FormData(e.currentTarget);
+            const classes = Object.fromEntries(Object.keys(wl.classes).map((k) => [k,
+              { reserved_pct: Number(f.get(`pct-${k}`)), priority: Number(f.get(`pri-${k}`)) }]));
+            run(async () => { setWl(await api<WorkloadConfig>("/admin/workload-classes", { method: "PUT", json: {
+              classes, borrow_idle_after_s: Number(f.get("idle")) } })); });
+          }}>
+            <div className="table-wrap"><table>
+              <thead><tr><th>Class</th><th>Reserved %</th><th>Priority (1 = first)</th></tr></thead>
+              <tbody>{Object.entries(wl.classes).map(([k, v]) => (
+                <tr key={k}><td><b>{k}</b></td>
+                  <td><input name={`pct-${k}`} type="number" min={0} max={100} defaultValue={v.reserved_pct} style={{ width: 90 }} /></td>
+                  <td><input name={`pri-${k}`} type="number" min={1} max={99} defaultValue={v.priority} style={{ width: 90 }} /></td></tr>
+              ))}</tbody>
+            </table></div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <label>Hold a class&apos;s reserved slots for (seconds after it was last active; 0 = never hold)
+                <input name="idle" type="number" min={0} max={86400} defaultValue={wl.borrow_idle_after_s} style={{ width: 120 }} /></label>
+              <button>Save classes</button>
+            </div>
+          </form>
         )}
       </div>
 

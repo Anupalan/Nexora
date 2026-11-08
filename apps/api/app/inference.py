@@ -22,7 +22,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import quota, router
+from app import quota, router, workload
 from app.config import get_settings
 from app.db import session_scope
 from app.gwerrors import GatewayError
@@ -33,6 +33,7 @@ from app.models import (
     InferenceRequest,
     Model,
     ModelDeployment,
+    Project,
     RequestEvent,
     UsageRecord,
     utcnow,
@@ -111,10 +112,14 @@ def load_context(db, key_id: uuid.UUID, alias: str) -> dict | None:
     if key is None or model is None:
         return None
     ensure_default_deployment(db, model.id)  # every model has at least one deployment
+    loaded = router.load_candidates(db, model.id)
+    raw = key.workload_class  # a key's own class wins over its project's; the client never chooses
+    if raw is None and key.project_id:
+        raw = db.scalar(select(Project.workload_class).where(Project.id == key.project_id))
     return {
         "user_id": key.user_id, "team_id": key.team_id, "project_id": key.project_id,
         "key_id": key.id, "model_id": model.id, "model_max_out": model.max_output_tokens,
-        "loaded": router.load_candidates(db, model.id),
+        "loaded": loaded, "klass": loaded.workload.known(raw),
         "limits": quota.resolve_limits(db, key),
     }
 
@@ -125,7 +130,7 @@ def create_request(db, ctx: dict, *, rid: uuid.UUID, decision: router.Decision, 
     r = InferenceRequest(
         id=rid, user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
         api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cand.id),
-        source=source, status="queued", stream=stream, idempotency_key=idem,
+        source=source, status="queued", stream=stream, idempotency_key=idem, workload_class=ctx["klass"],
         reserved_tokens=reservation["tokens"], reservation=reservation)
     db.add(r)
     try:
@@ -146,6 +151,7 @@ def reject_unrouted(db, ctx: dict, rid: uuid.UUID, decision: router.Decision, *,
         id=rid, user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
         api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cands[0].id),
         source=source, status="rejected", stream=stream, error_code=decision.error_code,
+        workload_class=ctx["klass"],
         error_message=decision.error_message, completed_at=utcnow(), reserved_tokens=0, reservation={})
     db.add(r)
     db.flush()
@@ -228,6 +234,9 @@ class Admitted:
     node_id: str | None = None
     node_max: int = 0
     attempt: int = 1
+    klass: str = workload.DEFAULT_CLASS
+    class_cfg: str = ""  # this deployment's class table for the claim script
+    idle_s: int = 0
 
 
 def _estimate_input(body: dict) -> int:
@@ -268,7 +277,8 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
         await router.fill_load(sched, loaded)
     except RedisError:
         raise GatewayError(503, "scheduler_unavailable", "Request scheduler is unavailable.", "api_error")
-    decision = router.choose(loaded.candidates, loaded.policy, est_tokens=est, request_id=str(rid))
+    klass = ctx["klass"]
+    decision = router.choose(loaded.candidates, loaded.policy, est_tokens=est, request_id=str(rid), klass=klass)
     if decision.chosen is None:
         await dbcall(reject_unrouted, ctx, rid, decision, stream=bool(body.get("stream")), source=source)
         status = {"context_length_exceeded": 400, "queue_full": 429}.get(decision.error_code, 503)
@@ -293,7 +303,7 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
             raise GatewayError(409, "duplicate_request",
                                "A request with this Idempotency-Key already exists.")
         try:
-            seq = await sched.enqueue(pick.id, rid, pick.max_queue)
+            seq = await sched.enqueue(pick.id, rid, pick.max_queue, klass, loaded.workload.borrow_idle_after_s)
             if seq < 0:
                 await dbcall(reject_request, rid, "queue_full", "The request queue is full.")
                 await quota.release_capacity(sched.redis, reservation, requests=True, tokens=est)
@@ -312,7 +322,9 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
         raise GatewayError(503, "scheduler_unavailable", "Request scheduler is unavailable.", "api_error")
     return Admitted(rid, pick.id, pick.max_active, pick.litellm_model, est_in, est,
                     bool(body.get("stream")), seq, model_id=ctx["model_id"], dep_name=pick.name,
-                    model_alias=pick.model_alias, node_id=pick.node_id, node_max=pick.node_budget or 0)
+                    model_alias=pick.model_alias, node_id=pick.node_id, node_max=pick.node_budget or 0,
+                    klass=klass, class_cfg=workload.claim_json(pick.max_active, loaded.workload),
+                    idle_s=loaded.workload.borrow_idle_after_s)
 
 
 # ---- settlement --------------------------------------------------------------------------
@@ -342,12 +354,14 @@ async def settle(sched: Scheduler, adm_id: uuid.UUID, dep_id: uuid.UUID, *, stat
 # ---- waiting and execution ---------------------------------------------------------------
 
 async def try_claim(sched: Scheduler, adm: Admitted) -> bool:
-    return await sched.try_claim(adm.dep_id, adm.id, adm.max_active, adm.node_id, adm.node_max)
+    cfg = [adm.class_cfg] if adm.class_cfg else []
+    return await sched.try_claim(adm.dep_id, adm.id, adm.max_active, adm.node_id, adm.node_max, *cfg)
 
 
 def _apply_move(adm: Admitted, info: dict) -> None:
     adm.dep_id, adm.max_active, adm.litellm_model = info["dep_id"], info["max_active"], info["litellm_model"]
     adm.dep_name, adm.node_id, adm.node_max = info["dep_name"], info.get("node_id"), info.get("node_max", 0)
+    adm.class_cfg = info.get("class_cfg", adm.class_cfg)
 
 
 async def wait_for_turn(sched: Scheduler, adm: Admitted, *, disconnected: Callable | None = None,
@@ -598,17 +612,18 @@ async def failover(sched: Scheduler, adm: Admitted) -> bool:
     loaded = await dbcall(router.load_candidates, adm.model_id)
     await router.fill_load(sched, loaded)
     decision = router.choose(loaded.candidates, loaded.policy, est_tokens=adm.reserved,
-                             request_id=str(adm.id), exclude={old})
+                             request_id=str(adm.id), exclude={old}, klass=adm.klass)
     if decision.chosen is None:
         return False
     new = decision.chosen
     await sched.release_active(old, adm.id)
-    seq = await sched.enqueue(new.id, adm.id, new.max_queue)
+    seq = await sched.enqueue(new.id, adm.id, new.max_queue, adm.klass, loaded.workload.borrow_idle_after_s)
     if seq < 0:
         return False
     adm.attempt += 1
     _apply_move(adm, {"dep_id": new.id, "max_active": new.max_active, "litellm_model": new.litellm_model,
-                      "dep_name": new.name, "node_id": new.node_id, "node_max": new.node_budget or 0})
+                      "dep_name": new.name, "node_id": new.node_id, "node_max": new.node_budget or 0,
+                      "class_cfg": workload.claim_json(new.max_active, loaded.workload)})
     adm.sequence = seq
     await dbcall(_reroute_db, adm.id, new.id, seq, loaded.policy, decision, from_dep=old,
                  attempt=adm.attempt, event="failover", requeue=True)
@@ -641,7 +656,7 @@ def _model_of(db, dep_id):
 
 def _reserved(db, rid):
     r = db.get(InferenceRequest, uuid.UUID(rid))
-    return r.reserved_tokens if r else 0
+    return (r.reserved_tokens, r.workload_class) if r else (0, workload.DEFAULT_CLASS)
 
 
 def _needs_evacuation(db) -> list[tuple[uuid.UUID, uuid.UUID]]:
@@ -669,20 +684,22 @@ async def rebalance_queued(sched: Scheduler) -> dict:
         loaded = await dbcall(router.load_candidates, model_id)
         await router.fill_load(sched, loaded)
         for rid in ids:
-            est = await dbcall(_reserved, rid)
+            est, klass = await dbcall(_reserved, rid)
             decision = router.choose(loaded.candidates, loaded.policy, est_tokens=est, request_id=rid,
-                                     exclude={str(dep_id)})
+                                     exclude={str(dep_id)}, klass=klass)
             if decision.chosen is None:
                 stuck += len(ids) - ids.index(rid)
                 break
             new = decision.chosen
-            seq = await sched.move_queued(str(dep_id), new.id, rid, new.max_queue)
+            seq = await sched.move_queued(str(dep_id), new.id, rid, new.max_queue,
+                                          loaded.workload.borrow_idle_after_s)
             if seq < 0:
                 stuck += 1
                 continue
             await sched.set_moved(rid, {"dep_id": new.id, "max_active": new.max_active,
                                         "litellm_model": new.litellm_model, "dep_name": new.name,
-                                        "node_id": new.node_id, "node_max": new.node_budget or 0})
+                                        "node_id": new.node_id, "node_max": new.node_budget or 0,
+                                        "class_cfg": workload.claim_json(new.max_active, loaded.workload)})
             await dbcall(_reroute_db, uuid.UUID(rid), new.id, seq, loaded.policy, decision,
                          from_dep=str(dep_id), attempt=2, event="rerouted", requeue=False)
             new.queued += 1  # later moves in this pass see the added load, so they spread out

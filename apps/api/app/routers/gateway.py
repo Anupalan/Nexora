@@ -80,7 +80,8 @@ async def list_models(key: KeyInfo = Depends(gateway_key)):
 
 def _route_headers(adm: Admitted) -> dict:
     """Tell the client what actually served the request (roadmap §19)."""
-    return {"x-nexora-deployment": adm.dep_name, "x-nexora-model": adm.model_alias}
+    return {"x-nexora-deployment": adm.dep_name, "x-nexora-model": adm.model_alias,
+            "x-nexora-class": adm.klass}
 
 
 def _error_event(code: str, message: str) -> list[bytes]:

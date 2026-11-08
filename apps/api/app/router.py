@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 
 from sqlalchemy import func, select
 
+from app import workload
 from app.config import get_settings
 from app.models import (
     InferenceNode,
@@ -61,6 +62,13 @@ class Candidate:
     queued: int = 0
     active: int = 0
     node_active: int = 0
+    # workload lanes (filled by load_candidates / fill_load); empty means classes are not in play
+    reserved: dict[str, int] = field(default_factory=dict)  # class -> reserved slots on this deployment
+    class_prio: dict[str, int] = field(default_factory=dict)  # class -> priority (lower goes first)
+    hold: bool = False  # recently-active classes keep their reserved slots
+    cls_active: dict[str, int] = field(default_factory=dict)
+    cls_queued: dict[str, int] = field(default_factory=dict)
+    cls_seen: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +100,7 @@ class Loaded:
     candidates: list[Candidate]
     node_deployments: dict[str, list[str]]  # node id -> every deployment id on that node
     policy: Policy
+    workload: "workload.WorkloadConfig" = field(default_factory=workload.WorkloadConfig)
 
 
 # ------------------------------------------------------------------ pure decision logic
@@ -116,11 +125,30 @@ def ineligible(c: Candidate, p: Policy, est_tokens: int, exclude: set[str]) -> s
     return None
 
 
-def expected_wait(c: Candidate, p: Policy) -> float:
-    """Seconds a new request would wait for a slot (queueing only, not generation)."""
+def expected_wait(c: Candidate, p: Policy, klass: str = workload.DEFAULT_CLASS) -> float:
+    """Seconds a new request of `klass` would wait for a slot (queueing only, not generation).
+
+    Slots held back for other recently-active classes are not available to this request, and classes that
+    outrank it count as work ahead of it. With no other class in play this reduces to the plain
+    (queued + running - slots + 1) / slots formula.
+    """
     svc = c.avg_service_s or p.default_service_s
-    ahead = max(0, c.queued + c.active - c.max_active + 1)
-    wait = ahead / max(1, c.max_active) * svc
+    if not c.cls_seen and not c.cls_queued and not c.cls_active:
+        ahead = max(0, c.queued + c.active - c.max_active + 1)
+        wait = ahead / max(1, c.max_active) * svc
+    else:
+        r_k, a_k = c.reserved.get(klass, 0), c.cls_active.get(klass, 0)
+        held_others = sum(max(0, c.reserved.get(o, 0) - c.cls_active.get(o, 0))
+                          for o in c.reserved if o != klass and c.hold and c.cls_seen.get(o))
+        held_others = min(held_others, max(0, c.max_active - 1))  # holding never shuts every slot
+        free_total = max(0, c.max_active - c.active)
+        free_k = free_total if a_k < r_k else max(0, free_total - held_others)
+        prio = c.class_prio.get(klass, 99)
+        backlog = c.cls_queued.get(klass, 0)
+        if a_k >= r_k:  # only borrowing: higher-priority classes that are waiting are served first
+            backlog += sum(n for o, n in c.cls_queued.items() if o != klass and c.class_prio.get(o, 99) < prio)
+        cap = max(1, c.max_active - held_others)
+        wait = max(0, backlog - free_k + 1) * svc / cap
     if c.node_budget and c.node_active >= c.node_budget:
         wait += svc  # the node as a whole is saturated
     return wait
@@ -131,7 +159,7 @@ def cold_cost(c: Candidate, p: Policy) -> float:
 
 
 def choose(cands: list[Candidate], policy: Policy, *, est_tokens: int, request_id: str,
-           exclude: set[str] | frozenset = frozenset()) -> Decision:
+           exclude: set[str] | frozenset = frozenset(), klass: str = workload.DEFAULT_CLASS) -> Decision:
     exclude = set(exclude)
     strategy = "fixed" if policy.frozen else policy.strategy
     pol = policy if not policy.frozen else Policy(**{**asdict(policy), "residency_aware": False})
@@ -139,12 +167,13 @@ def choose(cands: list[Candidate], policy: Policy, *, est_tokens: int, request_i
     eligible: list[Candidate] = []
     for c in sorted(cands, key=lambda x: (x.name, x.id)):
         why = ineligible(c, pol, est_tokens, exclude)
-        wait, cold = expected_wait(c, pol), cold_cost(c, pol)
+        wait, cold = expected_wait(c, pol, klass), cold_cost(c, pol)
         rows.append({"deployment": c.name, "deployment_id": c.id, "node": c.node, "eligible": why is None,
                      "excluded_because": why, "queued": c.queued, "active": c.active,
                      "max_active": c.max_active, "weight": c.weight, "health": c.health,
                      "resident": c.resident, "expected_wait_s": round(wait, 2),
-                     "cold_load_s": round(cold, 2),
+                     "cold_load_s": round(cold, 2), "class": klass, "class_reserved": c.reserved.get(klass, 0),
+                     "class_active": c.cls_active.get(klass, 0), "class_queued": c.cls_queued.get(klass, 0),
                      "score": round((wait + cold) * (100 / max(c.weight, 1)), 3)})
         if why is None:
             eligible.append(c)
@@ -264,18 +293,25 @@ def load_candidates(db, model_id) -> Loaded | None:
             max_active=int(cfg.get("max_active_requests") or st.default_max_active_requests),
             max_queue=int(cfg.get("max_queue_length") or st.default_max_queue_length),
             avg_service_s=(sum(recent) / len(recent) / 1000) if len(recent) >= 5 else None))
+    wl = workload.load_config(db)
+    for c in cands:
+        c.reserved = workload.reserved_slots(c.max_active, wl)
+        c.class_prio = {n: v["priority"] for n, v in wl.classes.items()}
+        c.hold = wl.borrow_idle_after_s > 0
     node_deps: dict[str, list[str]] = {}
     if node_ids:
         for dep_id, node_id in db.execute(select(ModelDeployment.id, ModelDeployment.node_id).where(
                 ModelDeployment.node_id.in_([uuid.UUID(x) for x in node_ids]))):
             node_deps.setdefault(str(node_id), []).append(str(dep_id))
-    return Loaded(model_id, model.model_alias, cands, node_deps, load_policy(db, model_id))
+    return Loaded(model_id, model.model_alias, cands, node_deps, load_policy(db, model_id), wl)
 
 
 async def fill_load(sched, loaded: Loaded) -> None:
     """Read live queue depth and running counts from Redis."""
     for c in loaded.candidates:
         c.queued, c.active = await sched.depth(c.id), await sched.active_count(c.id)
+        st = await sched.class_state(c.id, list(loaded.workload.classes))
+        c.cls_active, c.cls_queued, c.cls_seen = st["active"], st["queued"], st["seen"]
     cache: dict[str, int] = {}
     for c in loaded.candidates:
         if c.node_id:

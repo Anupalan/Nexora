@@ -2,8 +2,9 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { Badge, EmptyState, Err, Loading, PageHeader } from "@/components/ui";
+import { useUser } from "@/lib/session";
 import { IconKey } from "@/components/icons";
-import { api, ApiError, type ApiKeyCreated, type ApiKeyInfo, type ModelInfo, type Project } from "@/lib/api";
+import { api, ApiError, type ApiKeyCreated, type ApiKeyInfo, type ModelInfo, type Project, type WorkloadConfig } from "@/lib/api";
 
 /** OpenCode custom-provider config for an OpenAI-compatible endpoint. */
 function openCodeConfig(key: string, models: string[]) {
@@ -22,6 +23,9 @@ function openCodeConfig(key: string, models: string[]) {
 }
 
 export default function Keys() {
+  const user = useUser();
+  const admin = user.role === "super_admin";
+  const [classes, setClasses] = useState<string[]>([]);
   const [keys, setKeys] = useState<ApiKeyInfo[] | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -34,7 +38,8 @@ export default function Keys() {
     load();
     api<ModelInfo[]>("/models").then(setModels).catch(() => {});
     api<Project[]>("/projects").then(setProjects).catch(() => {});
-  }, []);
+    if (admin) api<WorkloadConfig>("/admin/workload-classes").then((c) => setClasses(Object.keys(c.classes))).catch(() => {});
+  }, [admin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : "Request failed");
 
@@ -96,11 +101,12 @@ export default function Keys() {
           <EmptyState icon={<IconKey />} title="No keys yet" hint="Create one above to connect a client." />
         ) : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Key</th><th>Models</th><th>Expires</th><th>Last used</th><th>Status</th><th /></tr></thead>
+            <thead><tr><th>Name</th><th>Key</th><th>Models</th>{admin && <th>Workload class</th>}<th>Expires</th><th>Last used</th><th>Status</th><th /></tr></thead>
             <tbody>{keys.map((k) => (
               <tr key={k.id}>
                 <td>{k.name}</td><td><code>{k.key_prefix}</code></td>
                 <td className="muted">{k.allowed_models.join(", ")}</td>
+                {admin && <td><select value={k.workload_class ?? ""} onChange={async (e) => { setError(""); try { await api(`/admin/keys/${k.id}/workload-class`, { method: "PATCH", json: { workload_class: e.target.value || null } }); load(); } catch (err) { fail(err); } }}><option value="">inherit from project</option>{classes.map((c) => <option key={c} value={c}>{c}</option>)}</select></td>}
                 <td className="muted">{k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "never"}</td>
                 <td className="muted">{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}</td>
                 <td><Badge value={k.status} /></td>

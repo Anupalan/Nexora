@@ -120,6 +120,8 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Workload class for lane scheduling (set by a super admin; a key's own class overrides it).
+    workload_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class ProjectMember(Base):
@@ -269,6 +271,7 @@ class ApiKey(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    workload_class: Mapped[str | None] = mapped_column(String(32), nullable=True)  # overrides the project's
 
     user: Mapped[User] = relationship(lazy="joined")
 
@@ -319,6 +322,7 @@ class InferenceRequest(Base):
     model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id", ondelete="RESTRICT"))
     deployment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("model_deployments.id", ondelete="RESTRICT"))
     source: Mapped[str] = mapped_column(String(20), default="api")
+    workload_class: Mapped[str] = mapped_column(String(32), default="standard")
     status: Mapped[str] = mapped_column(String(20), default="queued")
     stream: Mapped[bool] = mapped_column(Boolean, default=False)
     queue_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

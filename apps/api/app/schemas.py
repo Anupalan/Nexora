@@ -109,6 +109,7 @@ class ProjectOut(ORM):
     description: str | None
     status: str
     created_at: datetime
+    workload_class: str | None = None
 
 
 class ProjectDetail(ProjectOut):
@@ -189,6 +190,7 @@ class KeyOut(ORM):
     last_used_at: datetime | None
     created_at: datetime
     revoked_at: datetime | None
+    workload_class: str | None = None
 
 
 class KeyCreated(KeyOut):

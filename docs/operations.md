@@ -107,3 +107,20 @@ Back up secrets separately, encrypted, with restricted recovery access.
   avoids that while a warm node has capacity; set `load_seconds` on the deployment to your measured value.
 - **Failover is conservative on purpose:** it needs a connection-style error *and* a probe showing the node
   down. Any other failure is returned to the client rather than replayed.
+
+## Workload lanes
+- **Assign a class:** Projects page (project) or API Keys page (a single key); both super admin only. A key's class
+  overrides its project's; unassigned traffic is `standard`. The extraction service should have its own key with class
+  `extraction`; the PMS chatbot and PMS tool use `pms`; vibe-coding clients use `coding`.
+- **Tune reservations:** Routing page, *Workload classes* (percent per class, priority number, hold window). Percentages
+  must add up to at most 100. Classes cannot be deleted, only set to 0%. With very few slots a small class rounds to zero
+  reserved slots (it still gets priority at request boundaries).
+- **Slots must match the node.** Measure a node's real parallelism first (send N identical requests concurrently: if the
+  total is about N times one request, it is serial). Set each deployment's `max_active_requests` to that number. If it
+  is larger than Ollama really runs, requests queue inside Ollama where lanes cannot reorder them. DGX 1 measured serial
+  (parallelism 1) for the 8B model on 9 Nov 2026; DGX 2 has not been measured.
+- **What lanes cannot do:** they never interrupt a running request, so with one slot a chat request waits for the current
+  request to finish (seconds for chat-sized work, longer for very long generations). Keep extraction requests
+  reasonably sized, or raise `OLLAMA_NUM_PARALLEL` for true reserved capacity.
+- **See it working:** the Routing page shows running/reserved and waiting requests per class on each deployment; Usage
+  has a breakdown and filter by class; `GET /routing/explain/{id}` shows the class and its lane numbers.

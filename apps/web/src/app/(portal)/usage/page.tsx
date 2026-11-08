@@ -49,15 +49,27 @@ export default function Usage() {
           </div>
         </>
       )}
+      {report && report.by_class.length > 0 && (
+        <div className="card flush" style={{ marginBottom: 14 }}>
+          <div className="card-head">By workload class</div>
+          <div className="table-wrap"><table>
+            <thead><tr><th>Class</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Failed</th></tr></thead>
+            <tbody>{report.by_class.map((c) => (
+              <tr key={c.workload_class}><td><b>{c.workload_class}</b></td><td>{n(c.requests)}</td>
+                <td>{n(c.input_tokens)}</td><td>{n(c.output_tokens)}</td><td>{n(c.failed)}</td></tr>
+            ))}</tbody>
+          </table></div>
+        </div>
+      )}
       <h2 className="section">Request history</h2>
       <div className="card flush">
         {history.length === 0 ? <EmptyState icon={<IconInbox />} title="No requests in this range" /> : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Time</th><th>Model</th><th>Source</th><th>Status</th><th>In</th><th>Out</th>
+            <thead><tr><th>Time</th><th>Model</th><th>Class</th><th>Status</th><th>In</th><th>Out</th>
               <th>Queue ms</th><th>Duration ms</th><th>Error</th></tr></thead>
             <tbody>{history.map((r) => (
               <tr key={r.id}><td className="muted">{new Date(r.created_at).toLocaleString()}</td>
-                <td>{r.model}</td><td>{r.source}</td><td><Badge value={r.status} /></td>
+                <td>{r.model}</td><td>{r.workload_class}</td><td><Badge value={r.status} /></td>
                 <td>{n(r.input_tokens)}</td><td>{n(r.output_tokens)}</td><td>{n(r.queue_time_ms)}</td>
                 <td>{n(r.duration_ms)}</td><td className="muted">{r.error_code ?? ""}</td></tr>
             ))}</tbody>

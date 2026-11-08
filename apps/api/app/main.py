@@ -27,6 +27,7 @@ from app.routers import (
     teams,
     usage,
     users,
+    workload_admin,
 )
 
 settings = get_settings()
@@ -126,7 +127,7 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 for r in (auth.router, users.router, teams.router, projects.router, admin.router,
           keys.router, models.router, quotas.router, queue.router, usage.router,
-          routing.router):
+          routing.router, workload_admin.router):
     app.include_router(r, prefix="/api/v1")
 app.include_router(gateway.router)
 app.include_router(admin.metrics_router)

@@ -167,7 +167,9 @@ async def _deployment_rows(sched: Scheduler, model_id: uuid.UUID | None = None) 
                         "draining": c.draining, "health": c.health, "resident": c.resident,
                         "digest": c.digest, "context_limit": c.context_limit, "max_active": c.max_active,
                         "max_queue": c.max_queue, "load_seconds": c.load_seconds, "queued": c.queued,
-                        "active": c.active, "strategy": loaded.policy.strategy, "frozen": loaded.policy.frozen})
+                        "active": c.active, "strategy": loaded.policy.strategy, "frozen": loaded.policy.frozen,
+                        "classes": {n: {"reserved": c.reserved.get(n, 0), "active": c.cls_active.get(n, 0),
+                                        "queued": c.cls_queued.get(n, 0)} for n in loaded.workload.classes}})
     return out
 
 

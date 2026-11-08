@@ -45,7 +45,7 @@ added without redesigning the portal.
 | 3 | Quotas, usage and FIFO scheduler | Implemented; tested against real Redis (concurrency, recovery, cancellation) |
 | 4 | Admin analytics and operations | Implemented: dashboard, health checks, alerts, metrics, audit search, backups. Prometheus/Grafana files are syntax-checked only |
 | 5 | Activity logging depth | **Planned** |
-| 6 | Routing optimization | **Core implemented** (routing, health-aware and warm-model-aware selection, failover, queue re-routing, freeze, decision records, admin UI), verified on the real nodes. Latency-aware scoring, workload lanes, canary, rollups, recommendations and the simulator are still planned |
+| 6 | Routing optimization | **Core implemented** (routing, health-aware and warm-model-aware selection, failover, queue re-routing, freeze, decision records, admin UI), verified on the real nodes. **Workload lanes with reserved capacity** are implemented and measured on a real node. Latency-aware scoring, canary, rollups, recommendations and the simulator are still planned |
 | 7 | Production hardening and launch | **Planned** |
 
 The end-to-end workflow of §51 (admin creates team, developer, project and quotas; developer gets a
@@ -126,9 +126,22 @@ these tests, was unloaded afterwards to restore its idle state.
 | Context in effect | 65,536 tokens on both nodes (from `/api/ps`) |
 | Keep-alive | Requests that set none were given an **8-hour** expiry, so the servers' default is about 8 h. The 30B model on DGX 2 expires about 24 h out, which suggests the extraction service requests a longer keep-alive per call (inferred, to confirm) |
 
-Not yet measured: the 30B model's cold-load time, concurrent-request behavior (`OLLAMA_NUM_PARALLEL`),
-long-context behavior near the 64k limit, tool calling, and the `ollama_chat/` adapter. These need
-heavier requests and should be run in an agreed window.
+**Parallelism and lane isolation, measured on DGX 1 (9 November 2026, with the owner's agreement; DGX 2 was not
+touched).** DGX 1 runs the 8B model **one request at a time**: 4 concurrent identical requests took 6.05 s against
+about 6.3 s run serially (1.04x), and 8 concurrent took 12.04 s (1.04x). Further requests queue invisibly inside
+Ollama, so a deployment's `max_active_requests` must be 1 on this node until `OLLAMA_NUM_PARALLEL` is raised (which
+costs memory per extra slot). With one slot, lanes act as **priority at request boundaries** rather than split
+capacity: a burst of 8 extraction-sized requests with chat requests arriving during it gave
+
+| | First chat request during the burst | Other chat requests | Extraction burst finished in |
+|---|---|---|---|
+| Lanes off (plain FIFO) | **17.2 s** | 0.4-0.5 s (arrived after the burst drained) | 18.7 s |
+| Lanes on | **0.6 s** (all four 0.6-1.0 s) | 0.8-1.0 s | 17.8 s |
+
+Chat was no longer stuck behind the extraction queue, and extraction throughput did not drop.
+
+Not yet measured: the 30B model's cold-load time, DGX 2's parallelism, long-context behavior near the 64k limit,
+tool calling, and the `ollama_chat/` adapter.
 
 What this means for the plan:
 
@@ -157,8 +170,9 @@ What this means for the plan:
     models are installed on each node; which workloads should use them, which need additional models,
     and whether those fit alongside the resident ones. Which build of each model is the correct one
     (DGX 1's or DGX 2's digest; DGX 2 is probably the reference since extraction runs there), given extraction results may depend on it?
-2.  Remaining Ollama settings: `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`
-    (not visible from the API; context 65,536 and an 8-hour default keep-alive are now known).
+2.  Remaining Ollama settings: `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`, and whether to raise
+    `OLLAMA_NUM_PARALLEL` (DGX 1 measured at an effective parallelism of 1; DGX 2 not measured). Context 65,536
+    and an 8-hour default keep-alive are known.
     Versions `0.40.2` (DGX 1) and `0.40.5` (DGX 2) are confirmed.
 3.  Whether the document-extraction service can be repointed at the gateway, and its current volume,
     input sizes and latency tolerance.
@@ -638,11 +652,13 @@ Configured per model alias, selectable and combinable:
 6.  **Weighted round-robin:** operator-set weights, for gradual rollouts and uneven hardware.
 7.  **Context-length aware:** estimate input plus requested output tokens; route requests that exceed
     a deployment's context or memory comfort zone to deployments tagged `long-context`.
-8.  **Workload lanes:** `interactive`, `coding` and `batch` lanes with reserved capacity per node, so document
-    extraction cannot starve the chatbot and a coding session cannot starve extraction; FIFO inside
-    each lane. The lane comes from the key's or project's workload class, never from client
-    self-declaration alone. Unused reserved capacity may be borrowed by other lanes and reclaimed when
-    its owner returns.
+8.  **Workload lanes (implemented):** classes `pms`, `coding`, `extraction` and a catch-all `standard`, assigned by a
+    super admin to a project or key (a key's class wins) and never chosen by the client. Each class reserves a share
+    of every deployment's slots (default 50/25/25). A free slot goes first to a waiting class still under its
+    reservation, then by priority number (extraction first), then by age; order inside a class stays strictly FIFO.
+    Idle reserved slots can be borrowed, except the slots of a class active within `borrow_idle_after_s` (default
+    60 s), which are held, but never so many that every slot is held. Running requests are never preempted. The
+    router's score is class-aware.
 9.  **Explicit fallback chain:** alias A may fall back to alias B (or deployment 2) only if an
     administrator approved that exact fallback; the response carries a header naming the model that
     actually served the request.
@@ -1989,9 +2005,14 @@ and a probe confirms the node is down (otherwise never replayed); re-routing of 
 unhealthy, draining or disabled deployments, in order; versioned policies; the freeze switch; the admin
 Routing page.
 
-Still planned: latency-aware scoring from rollups, workload classes and lanes with reserved capacity,
-warm-up and keep-alive management, canary percentages, rollups, recommendations, the replay simulator and
-the benchmark harness, tool-call and long-context validation on the real nodes.
+Also implemented (9 November 2026): **workload classes and lanes** (`pms`, `coding`, `extraction`, `standard`),
+assigned by a super admin to projects or keys, with reserved slots per deployment, priority-ordered borrowing of
+idle capacity, a bounded hold on recently-active classes, class-aware routing scores, usage by class and the admin
+class editor.
+
+Still planned: latency-aware scoring from rollups, warm-up and keep-alive management, canary percentages,
+rollups, recommendations, the replay simulator and the benchmark harness, tool-call and long-context validation
+on the real nodes, and measuring DGX 2's parallelism in an agreed window (it carries production extraction).
 
 Original task list: Requires at least two registered
 deployments to demonstrate (they may share hardware initially, or use a second node when available).

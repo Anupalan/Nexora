@@ -28,19 +28,21 @@ class Filters:
     def __init__(self, date_from: datetime | None = None, date_to: datetime | None = None,
                  project_id: uuid.UUID | None = None, api_key_id: uuid.UUID | None = None,
                  model: str | None = None, status: str | None = None, source: str | None = None,
-                 user_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None):
+                 user_id: uuid.UUID | None = None, team_id: uuid.UUID | None = None,
+                 workload_class: str | None = None):
         self.date_to = as_utc(date_to) if date_to else utcnow()
         self.date_from = as_utc(date_from) if date_from else self.date_to - timedelta(days=30)
         self.project_id, self.api_key_id, self.model = project_id, api_key_id, model
         self.status, self.source, self.user_id, self.team_id = status, source, user_id, team_id
+        self.workload_class = workload_class
 
 
 def filters(date_from: datetime | None = Query(None, alias="from"),
             date_to: datetime | None = Query(None, alias="to"), project_id: uuid.UUID | None = None,
             api_key_id: uuid.UUID | None = None, model: str | None = None, status: str | None = None,
             source: str | None = None, user_id: uuid.UUID | None = None,
-            team_id: uuid.UUID | None = None) -> Filters:
-    f = Filters(date_from, date_to, project_id, api_key_id, model, status, source, user_id, team_id)
+            team_id: uuid.UUID | None = None, workload_class: str | None = None) -> Filters:
+    f = Filters(date_from, date_to, project_id, api_key_id, model, status, source, user_id, team_id, workload_class)
     if f.date_to - f.date_from > timedelta(days=366):
         raise ApiError(400, "RANGE_TOO_LARGE", "Date range may not exceed 366 days.")
     return f
@@ -67,6 +69,8 @@ def _conditions(db: DBSession, actor: User, f: Filters, *, only_self: bool = Fal
         c.append(InferenceRequest.user_id == f.user_id)
     if f.team_id:
         c.append(InferenceRequest.team_id == f.team_id)
+    if f.workload_class:
+        c.append(InferenceRequest.workload_class == f.workload_class)
     if f.model:
         c.append(InferenceRequest.model_id.in_(select(Model.id).where(Model.model_alias == f.model)))
     return c
@@ -91,7 +95,7 @@ def _add(b: dict, r: InferenceRequest) -> None:
 
 
 def build_report(rows, f: Filters) -> dict:
-    totals, by_day, by_model, by_project, by_key = _bucket(), {}, {}, {}, {}
+    totals, by_day, by_model, by_project, by_key, by_class = _bucket(), {}, {}, {}, {}, {}
     queue_ms, ttft_ms = [], []
     for r, alias in rows:
         if r.status == "rejected":  # never reached the model; shown in history only
@@ -101,6 +105,7 @@ def build_report(rows, f: Filters) -> dict:
         _add(by_model.setdefault(alias, _bucket()), r)
         _add(by_project.setdefault(str(r.project_id) if r.project_id else None, _bucket()), r)
         _add(by_key.setdefault(str(r.api_key_id) if r.api_key_id else None, _bucket()), r)
+        _add(by_class.setdefault(r.workload_class, _bucket()), r)
         if r.queue_time_ms is not None:
             queue_ms.append(r.queue_time_ms)
         if r.time_to_first_token_ms is not None:
@@ -113,6 +118,7 @@ def build_report(rows, f: Filters) -> dict:
         "by_model": [{"model": k, **v} for k, v in sorted(by_model.items())],
         "by_project": [{"project_id": k, **v} for k, v in by_project.items()],
         "by_key": [{"api_key_id": k, **v} for k, v in by_key.items()],
+        "by_class": [{"workload_class": k, **v} for k, v in sorted(by_class.items())],
     }
 
 
@@ -152,6 +158,7 @@ def usage_report(f: Filters = Depends(filters), actor: User = Depends(current_us
 def _history_item(r: InferenceRequest, alias: str) -> dict:
     return {"id": str(r.id), "model": alias, "project_id": str(r.project_id) if r.project_id else None,
             "api_key_id": str(r.api_key_id) if r.api_key_id else None, "source": r.source,
+            "workload_class": r.workload_class,
             "status": r.status, "input_tokens": r.input_tokens, "output_tokens": r.output_tokens,
             "queue_time_ms": r.queue_time_ms, "time_to_first_token_ms": r.time_to_first_token_ms,
             "duration_ms": r.duration_ms, "error_code": r.error_code, "created_at": r.created_at}
@@ -172,7 +179,7 @@ def _safe(v) -> str:
     return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s  # CSV/formula injection
 
 
-CSV_COLUMNS = ["id", "created_at", "model", "project_id", "api_key_id", "source", "status",
+CSV_COLUMNS = ["id", "created_at", "model", "project_id", "api_key_id", "source", "workload_class", "status",
                "input_tokens", "output_tokens", "queue_time_ms", "time_to_first_token_ms",
                "duration_ms", "error_code"]
 
