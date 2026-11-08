@@ -39,7 +39,6 @@ def main() -> int:
     a.add_argument("--email", required=True)
     a.add_argument("--name", default="Administrator")
     args = p.parse_args()
-
     with Session(get_engine()) as db:
         seed_roles(db)
         if args.cmd == "create-admin":

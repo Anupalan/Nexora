@@ -124,7 +124,8 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 
 for r in (auth.router, users.router, teams.router, projects.router, admin.router,
-          keys.router, models.router, quotas.router, queue.router, usage.router):
+          keys.router, models.router, quotas.router, queue.router, usage.router,
+          ):
     app.include_router(r, prefix="/api/v1")
 app.include_router(gateway.router)
 app.include_router(admin.metrics_router)

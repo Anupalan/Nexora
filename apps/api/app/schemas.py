@@ -82,15 +82,11 @@ class ProjectCreate(BaseModel):
     team_id: uuid.UUID
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
-    repository_url: str | None = Field(default=None, max_length=500)
-    default_branch: str = Field(default="main", max_length=200)
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
-    repository_url: str | None = Field(default=None, max_length=500)
-    default_branch: str | None = Field(default=None, max_length=200)
     status: Literal["active", "archived"] | None = None
 
 
@@ -111,8 +107,6 @@ class ProjectOut(ORM):
     team_id: uuid.UUID
     name: str
     description: str | None
-    repository_url: str | None
-    default_branch: str
     status: str
     created_at: datetime
 

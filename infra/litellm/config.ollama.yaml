@@ -1,0 +1,43 @@
+# LiteLLM in front of the two Ollama nodes. Nexora does the routing (see roadmap §6.1): every
+# deployment gets its OWN model_name, and Nexora picks which one to call. Do not give two entries the
+# same model_name or LiteLLM will also balance between them and the two routers will fight.
+#
+# Ollama has no authentication: keep both endpoints on a private network reachable only from this
+# gateway host. Set the URLs in the environment, not in this file.
+#
+#   OLLAMA_DGX1_URL=http://127.0.0.1:10100                       # local to the gateway host; 0.40.2, idle
+#   OLLAMA_DGX2_URL=http://<dgx2-private-address>:10101          # remote; 0.40.5, models resident
+#   (set OLLAMA_DGX1_URL_V1 / OLLAMA_DGX2_URL_V1 to the same values with /v1 appended)
+#
+# VERIFIED on both nodes with LiteLLM 1.108.3 (8 Nov 2026): the `openai/` adapter against Ollama's /v1,
+# streaming with token usage (`stream_options.include_usage`), vision (image_url) input, model names
+# containing '@', and per-key model allow-lists. Context in effect is 65,536 tokens.
+# NOT yet verified: the 30B model's timings, concurrent-request behavior (OLLAMA_NUM_PARALLEL),
+# long-context behavior near 64k, tool calling, and the `ollama_chat/` adapter.
+# The two nodes currently hold different builds (digests) of the same model tags and run different
+# Ollama versions; reconcile them before routing between nodes.
+model_list:
+  - model_name: qwen3-vl-30b@dgx1
+    litellm_params:
+      model: openai/qwen3-vl:30b-a3b-instruct
+      api_base: os.environ/OLLAMA_DGX1_URL_V1
+      api_key: not-needed
+  - model_name: qwen3-vl-8b@dgx1
+    litellm_params:
+      model: openai/qwen3-vl:8b-instruct
+      api_base: os.environ/OLLAMA_DGX1_URL_V1
+      api_key: not-needed
+  - model_name: qwen3-vl-30b@dgx2
+    litellm_params:
+      model: openai/qwen3-vl:30b-a3b-instruct
+      api_base: os.environ/OLLAMA_DGX2_URL_V1
+      api_key: not-needed
+  - model_name: qwen3-vl-8b@dgx2
+    litellm_params:
+      model: openai/qwen3-vl:8b-instruct
+      api_base: os.environ/OLLAMA_DGX2_URL_V1
+      api_key: not-needed
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/LITELLM_DATABASE_URL

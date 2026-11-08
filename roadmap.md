@@ -1,40 +1,180 @@
-# Nexora --- Complete Product Roadmap & Technical Specification
+# Nexora --- Product Roadmap & Technical Specification
 
-**Version:** 1.0\
+**Version:** 2.0 (scope revision of 8 November 2026)\
 **Date:** 8 November 2026\
-**Status:** Approved for implementation planning\
-**Product type:** Self-hosted, multi-user AI inference gateway and
-agentic coding platform\
-**Primary inference hardware:** NVIDIA DGX Spark, 128 GB unified memory\
-**Primary stack:** Next.js, React, TypeScript, FastAPI, PostgreSQL,
-Redis, LiteLLM, vLLM, Docker\
-**Deployment model:** Public HTTPS application with private application,
-inference and workspace networks
+**Status:** Phases 0--4 implemented; Phases 5--7 planned\
+**Product type:** Self-hosted, multi-user AI model gateway with activity logging and routing
+optimization\
+**Tagline:** One Platform. Every Intelligence.\
+**Primary inference hardware:** two NVIDIA DGX Spark systems, 128 GB unified memory each\
+**Inference runtime:** Ollama on each node (the runtime is an adapter; others can be added)\
+**Primary stack:** Next.js, React, TypeScript, FastAPI, PostgreSQL, Redis, LiteLLM, Ollama\
+**Deployment model:** Public HTTPS application with private application and inference networks
 
-------------------------------------------------------------------------
+---
 
 ## 1. Executive Summary
 
-Nexora is a centralized internal AI platform that allows developers
-to use organization-hosted language models through two access channels:
+Nexora is a centralized internal AI platform that gives an organization controlled, observable
+and efficient access to its own language models. It has three pillars:
 
-1.  **OpenAI-compatible API gateway** for OpenCode, Cline, Goose, Aider
-    and other compatible clients.
-2.  **Browser-based coding workspace** with repository management, AI
-    chat, code editing, terminal execution, task tracking, diffs and Git
-    workflows.
+1.  **Model Gateway --- access to models.** An OpenAI-compatible API (for OpenCode, Cline, Goose,
+    Aider and any compatible client) with individually attributable API keys, team and project
+    access, quotas and a fair FIFO queue in front of the inference servers.
+2.  **Activity Intelligence --- log everything that matters.** Every request, key use, sign-in and
+    administrative change is recorded with attribution, timing, token usage and outcome, searchable,
+    exportable and retained under an explicit policy. Prompt and completion content is **not**
+    retained unless an organizational policy deliberately enables it.
+3.  **Routing Optimization --- use the hardware well.** As deployments multiply (more DGX Spark nodes,
+    more models), Nexora decides where each request should run, from measured load, latency and
+    health, explains every decision, and recommends configuration changes backed by the logged data.
 
-The platform centralizes developer identity, team and project access,
-API key provisioning, model access, request scheduling, request/token
-quotas, usage metering, audit logging, monitoring and administration.
+Developers must never connect directly to Ollama. All inference passes through authenticated gateway,
+quota and scheduling controls, so every request is attributable to a user, team, project and key.
 
-The DGX Spark is the private inference host. Developers must not connect
-directly to vLLM. All inference requests pass through authenticated
-gateway and scheduling controls.
+The product stays modular: more DGX Spark systems, model deployments and inference workers can be
+added without redesigning the portal.
 
-The product must be modular so additional DGX Spark systems, model
-deployments and inference workers can be added without redesigning the
-portal.
+### 1.1 Implementation status (8 November 2026)
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Technical validation | Partly done: LiteLLM 1.108.3 validated locally against a mock backend; **validation on the real Ollama/DGX Spark nodes still open** |
+| 1 | Foundation and identity | Implemented and tested |
+| 2 | LiteLLM gateway and API keys | Implemented; validated against the real LiteLLM proxy |
+| 3 | Quotas, usage and FIFO scheduler | Implemented; tested against real Redis (concurrency, recovery, cancellation) |
+| 4 | Admin analytics and operations | Implemented: dashboard, health checks, alerts, metrics, audit search, backups. Prometheus/Grafana files are syntax-checked only |
+| 5 | Activity logging depth | **Planned** |
+| 6 | Routing optimization | **Planned** |
+| 7 | Production hardening and launch | **Planned** |
+
+The end-to-end workflow of §51 (admin creates team, developer, project and quotas; developer gets a
+key and uses it; usage is metered; over-quota requests are rejected) is demonstrated by
+`tests/e2e/demo.py` against the real LiteLLM proxy, with a mock standing in for Ollama.
+
+### 1.2 Deployment context and workloads
+
+Nexora will run on the host that already runs one of the two DGX Spark nodes (Ollama on
+`localhost`); the second node is reached over the private network. Until now both nodes have served a
+single workload, document extraction. The aim is to serve several workloads from the same hardware
+through this one gateway, routing each request to whichever node will serve it best.
+
+| Workload | Character | What it needs from the platform |
+|---|---|---|
+| Document extraction (existing) | Batch, long inputs, throughput-oriented, tolerant of waiting | Must not be starved, and must not starve others; ideally moved behind the gateway |
+| PMS chatbot | Interactive, multi-turn, latency-sensitive (time to first token) | Priority, warm models, predictable queue wait |
+| PMS tool (programmatic calls) | Short and structured, often JSON output, bursts | Reliable, quota-controlled, cheap routing |
+| Vibe coding (OpenCode, Cline, Goose, Aider) | Long context, streaming, sustained sessions, large outputs | Coding-capable model, long-context routing, fair share |
+
+Consequences that shape the design:
+
+-   **Workload classes.** Each key or project belongs to a class (interactive, batch, coding) that
+    drives priority lane, quotas and routing policy; the class is assigned by an administrator, never
+    self-declared by the client.
+-   **Warm models matter.** Ollama loads and unloads models on demand; a cold load can take seconds to
+    minutes and evicts something else. Routing prefers a node where the requested model is already
+    resident and manages keep-alive deliberately (§6.3).
+-   **Shared hardware.** Doc extraction, chat and coding compete for the same memory and compute on each
+    node. Reserved capacity and per-class limits keep one workload from degrading the rest.
+-   **Anything that bypasses the gateway is invisible load.** Callers that talk to Ollama directly
+    consume capacity the router cannot see, so the existing extraction service should move behind the
+    gateway (own key, own class) as part of rollout.
+-   **Ollama has no authentication.** It must listen on `localhost` (DGX 1, the gateway host) or a private interface
+    reachable only from the gateway host (DGX 2), never on a public address.
+-   **Co-location.** Running the gateway on DGX 1 shares that node's memory and CPU with inference and
+    makes the gateway a single point of failure for both nodes; size memory accordingly and plan
+    process supervision and, later, a standby.
+
+#### Proposed initial placement
+
+Keep today's document extraction where its models are already warm (DGX 2) and start the new
+interactive workloads (PMS chatbot, PMS tool, vibe coding) on the idle, local DGX 1. This isolates the
+workloads by placement from the first day, so lane reservations do not have to be perfect before launch,
+and it produces the measurements routing needs (time to first token, load times, contention). Cross-node
+routing is then enabled in stages: interactive traffic may overflow to DGX 2 only when DGX 1 is saturated
+and the model is resident there; batch traffic may use DGX 1's spare capacity outside the interactive
+reserve. The extraction service moves behind the gateway first (own key, `batch` class, pinned to
+DGX 2) before any overflow is switched on.
+
+#### Observed environment (read-only checks, 8 November 2026)
+
+Measured from the development machine over the private (Tailscale) network with metadata calls only
+and no generation requests, so production traffic was not disturbed. Addresses are kept out of this
+document; the two nodes are on different private addresses. **DGX 1** (port `10100`) is local to the
+gateway host, which will reach it on `localhost`; **DGX 2** (port `10101`) is remote.
+
+| Item | DGX 1 (local, port 10100) | DGX 2 (remote, port 10101) |
+|---|---|---|
+| Reachable | Yes (about 31 ms from the development machine; loopback in production) | Yes, about 25 ms round trip |
+| Ollama version | **0.40.2** | **0.40.5** |
+| OpenAI-compatible `/v1` | Enabled | Enabled |
+| Installed models | `qwen3-vl:8b-instruct` (8.8B Q4_K_M), `qwen3-vl:30b-a3b-instruct` (31B MoE Q4_K_M) | The same two tags |
+| Currently loaded | **Nothing** (idle, cold) | **Both** (26.1 GB and 15.6 GB resident, about 42 GB of 128 GB); keep-alive differs per model |
+| Capabilities / context | Completion, vision, tools; 262,144-token maximum, **65,536 in effect** when loaded | Same: **65,536 in effect** |
+| Model digests | `30b`: `4695d1593d59`, `8b`: `6ec59f0dd38f` (pulled 9 Oct) | `30b`: `c871fc73fabc`, `8b`: `0533d74300e4` (pulled 17 Oct) |
+
+**Measured with tiny requests (8 November 2026, with the owner's permission).** The 8B model, a few
+tokens each, once directly and once through the real LiteLLM 1.108.3 proxy; DGX 1's 8B model, loaded by
+these tests, was unloaded afterwards to restore its idle state.
+
+| Measurement | Result |
+|---|---|
+| Cold load of the 8B model on DGX 1 | **5.4 s** to first token (16 GB resident afterwards because of the 64k context) |
+| Warm time to first token, direct | about 0.06 s on both nodes (including the network round trip) |
+| Token usage in a streamed reply (`stream_options.include_usage`) | **Reported** by Ollama's `/v1` endpoint and passed through LiteLLM: prompt, completion and cached-prompt token counts. Nexora does not need to estimate usage |
+| Through LiteLLM (`openai/` adapter, names such as `qwen3-vl-8b@dgx1`) | Text, streaming with usage, and **vision** (an image input was described correctly) all work on both nodes; per-key model allow-lists are enforced (403 for a model not on the key) |
+| Context in effect | 65,536 tokens on both nodes (from `/api/ps`) |
+| Keep-alive | Requests that set none were given an **8-hour** expiry, so the servers' default is about 8 h. The 30B model on DGX 2 expires about 24 h out, which suggests the extraction service requests a longer keep-alive per call (inferred, to confirm) |
+
+Not yet measured: the 30B model's cold-load time, concurrent-request behavior (`OLLAMA_NUM_PARALLEL`),
+long-context behavior near the 64k limit, tool calling, and the `ollama_chat/` adapter. These need
+heavier requests and should be run in an agreed window.
+
+What this means for the plan:
+
+-   **Same tag, different model build.** The two nodes carry different digests for both models (sizes
+    differ by about 48 MB), so a request for one alias could be served by subtly different weights,
+    templates or parameters depending on the node. Document extraction outputs may differ between nodes
+    today. Before routing treats the nodes as interchangeable they must run identical digests; the node
+    sampler verifies this continuously and a mismatch raises an alert and, by policy, excludes the stale
+    deployment (§6.1). The Ollama versions should be aligned too.
+-   **DGX 2 is warm and busy; DGX 1 is cold, idle and older.** A request sent to DGX 1 right now pays a
+    model load (seconds to minutes), though nothing needs evicting since it is empty. DGX 2 is the one
+    doing the extraction work today, so it is the likely reference build. This is exactly the case
+    residency-aware routing, warm-up (§6.3) and the proposed initial placement exist for, and it means
+    routing defaults must be measured, not assumed.
+-   **The models are vision-language models**, which suits document extraction. Chat, tool calls and
+    coding may run well on them (they support tools and long context) or may want a dedicated text or
+    coding model; that is a Phase 0 measurement and decision.
+-   **Context in effect is 65,536 tokens**, well below the 262,144 the models support. Requests longer than this are a risk: Ollama may truncate over-long prompts rather than fail them, which would silently corrupt an extraction or a coding session. The gateway therefore enforces each deployment's context limit itself and rejects over-length requests with a clear error (to be verified against the real behavior). Raising the context costs memory on each node (the 8B model already occupies about 16 GB at 64k).
+-   **Ollama has no authentication**, and anything on the private network can call both nodes. Network
+    policy (for example Tailscale ACLs) should restrict them to the gateway host and the existing
+    extraction service until that service moves behind the gateway.
+
+### 1.3 Open questions (to settle before Phase 6 design is frozen)
+
+1.  Models wanted per workload (chat, tool calls, coding, extraction). Today only the two Qwen3-VL
+    models are installed on each node; which workloads should use them, which need additional models,
+    and whether those fit alongside the resident ones. Which build of each model is the correct one
+    (DGX 1's or DGX 2's digest; DGX 2 is probably the reference since extraction runs there), given extraction results may depend on it?
+2.  Remaining Ollama settings: `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`
+    (not visible from the API; context 65,536 and an 8-hour default keep-alive are now known).
+    Versions `0.40.2` (DGX 1) and `0.40.5` (DGX 2) are confirmed.
+3.  Whether the document-extraction service can be repointed at the gateway, and its current volume,
+    input sizes and latency tolerance.
+4.  Whether any workload needs embeddings (vision input works on both nodes).
+5.  Whether DGX 1 (gateway host) can spare memory for Postgres, Redis and the app next to inference.
+
+### 1.4 Scope revision log
+
+-   **8 Nov 2026 (v2.0):** The browser coding workspace and AI agent runtime are **removed from scope**.
+    Nexora is a model-access, activity-logging and routing-optimization platform. Removed: the
+    coding workspace, repository connections and credentials, agent tasks and tools, isolated
+    execution hosts, the Monaco editor, and the associated schema, APIs, UI, security tests and
+    phases (previous Phases 5 and 6). Coding agents remain first-class *clients* of the gateway
+    (OpenCode, Cline, Goose, Aider), but Nexora does not host them. A Phase 7 hardening phase remains.
+    Cleanup owed in code: the implemented `projects.repository_url` / `default_branch` columns and the
+    uncommitted workspace, repository, secret and workspace-event code, tables and UI are to be removed.
 
 ## 2. Product Goals
 
@@ -42,76 +182,52 @@ portal.
 
 -   Provide a secure shared local-LLM service for multiple developers.
 -   Give every developer individually attributable API keys.
--   Support OpenAI-compatible clients with minimal configuration
-    changes.
--   Enforce request-count and token-count limits at global, team, user
-    and key levels.
--   Provide a durable FIFO request queue with queue visibility and
-    cancellation.
--   Measure token consumption, latency, throughput, failures and queue
-    wait time.
--   Provide a custom browser-based coding workspace.
--   Isolate repositories, credentials, terminals and agent execution
-    environments.
--   Give administrators a single control plane for users, teams,
-    projects, models, keys, quotas and infrastructure.
--   Keep inference data within the organization's controlled
-    infrastructure.
+-   Support OpenAI-compatible clients with minimal configuration changes.
+-   Enforce request-count and token-count limits at global, team, user, key and project levels.
+-   Provide a durable FIFO request queue with queue visibility and cancellation.
+-   Record every request with attribution, token usage, queue wait, time to first token, generation
+    throughput, status and error category, and keep that record trustworthy and queryable.
+-   Make activity auditable: tamper-evident audit trail, searchable history, exports and retention
+    policies, with privacy-preserving defaults (no prompt/completion retention by default).
+-   Route requests across deployments to minimize waiting and failures and to use each inference
+    server efficiently, with every routing decision explainable and reversible.
+-   Turn the logged activity into concrete optimization advice (concurrency, replica placement,
+    model choice) that an administrator can accept, test and roll back.
+-   Give administrators a single control plane for users, teams, projects, models, keys, quotas,
+    routing and infrastructure health.
+-   Keep inference data within the organization's controlled infrastructure.
 
-### 2.2 Non-goals for the initial release
+### 2.2 Non-goals
 
 -   Training or fine-tuning models.
 -   Public multi-tenant SaaS billing.
--   Replacing GitHub as the source-control platform.
--   Building a general-purpose cloud IDE with every feature of VS Code.
--   Supporting arbitrary model runtimes beyond the defined provider
-    abstraction.
--   Allowing unrestricted shell access to the host.
--   Guaranteeing a fixed number of concurrent developers before load
-    testing.
+-   Hosting coding workspaces, a browser IDE or agent runtimes (removed in v2.0; coding agents are
+    clients of the gateway, not part of it).
+-   Replacing GitHub or any source-control platform.
+-   Supporting arbitrary model runtimes beyond the defined provider abstraction.
+-   Silently substituting a cheaper or weaker model for the one a client asked for.
+-   Guaranteeing a fixed number of concurrent developers before load testing.
 
 ## 3. Success Metrics
 
-Track these product and operational metrics:
+| Area | Metric |
+|---|---|
+| Availability | Portal, gateway and inference availability |
+| Access | Successful authentication and key provisioning |
+| Quotas | Correct rejection and reservation under concurrency |
+| Scheduling | FIFO ordering correctness and queue wait time (p50/p95) |
+| Inference | Requests/sec, tokens/sec, time to first token |
+| Reliability | Request success rate, retry and failover rate |
+| Attribution | Percentage of requests with user, team, project and key attribution (target 100%) |
+| Logging | Completeness of request records, audit-trail integrity checks, export success |
+| Routing | Queue wait and time-to-first-token improvement versus fixed routing; failover success; share of decisions with a recorded explanation (target 100%) |
+| Optimization | Recommendations accepted, and the measured effect after they were applied |
+| Operations | Backup success, restore test success and alert response |
 
-  -----------------------------------------------------------------------
-  Area                                Metric
-  ----------------------------------- -----------------------------------
-  Availability                        Portal, gateway and inference
-                                      availability
+Do not use tokens/sec alone as a measure of model service quality. Track queue wait, time to first
+token, error rate and completion outcome together, per model and per deployment.
 
-  Access                              Successful authentication and key
-                                      provisioning
-
-  Quotas                              Correct rejection and reservation
-                                      under concurrency
-
-  Scheduling                          FIFO ordering correctness and queue
-                                      wait time
-
-  Inference                           Requests/sec, tokens/sec, time to
-                                      first token
-
-  Reliability                         Request success rate and retry rate
-
-  Attribution                         Percentage of requests with user,
-                                      team, project and key attribution
-
-  Workspace                           Workspace creation success and
-                                      isolation test results
-
-  Developer experience                Task completion, workspace usage
-                                      and developer feedback
-
-  Operations                          Backup success, restore test
-                                      success and alert response
-  -----------------------------------------------------------------------
-
-Do not use tokens/sec alone as a measure of coding-agent productivity.
-Measure completed tasks, test pass rates, tool-call reliability and time
-to completion.
-
-------------------------------------------------------------------------
+---
 
 # PART I --- PRODUCT AND USER EXPERIENCE
 
@@ -139,7 +255,7 @@ to completion.
 -   View team usage and request history.
 -   Allocate quotas within administrator-defined limits.
 -   Revoke keys belonging to team members when authorized.
--   View team workspace and task activity.
+-   View team activity and usage.
 
 ### 4.3 Developer
 
@@ -147,18 +263,15 @@ to completion.
 -   Create and manage personal API keys.
 -   Select permitted models.
 -   Use the API gateway from compatible coding clients.
--   Use the browser coding workspace.
 -   View personal usage, quota consumption and request history.
--   Create coding tasks and inspect results.
--   Review and approve code changes before Git operations.
+-   View personal activity, including routing decisions that affected their requests.
 
 ### 4.4 Authorization principles
 
 -   Enforce permissions on the backend, not only in the frontend.
 -   Deny access by default.
 -   Apply team and project membership checks to every resource.
--   Prevent users from reading another user's keys, prompts,
-    repositories, workspaces or task output.
+-   Prevent users from reading another user's keys, request history or activity.
 -   Log privileged operations.
 -   Require stronger authentication for administrative actions.
 
@@ -196,10 +309,9 @@ Features:
 -   Create teams and assign team administrators.
 -   Add and remove team members.
 -   Create projects under a team.
--   Connect a project to a Git repository.
 -   Assign project-level roles.
 -   Set project-specific model permissions and quota policies.
--   View project usage and agent tasks.
+-   View project usage and activity.
 
 Suggested project access levels:
 
@@ -240,7 +352,7 @@ Security requirements:
 Features:
 
 -   Register model aliases.
--   Map aliases to LiteLLM model names and vLLM deployments.
+-   Map aliases to LiteLLM model names and Ollama deployments (a deployment is one model on one node).
 -   Enable/disable models.
 -   Configure model display name and description.
 -   Configure context and output limits.
@@ -326,9 +438,9 @@ Important distinction:
 -   A request waiting in the queue must not reserve an inference slot.
 -   Once admitted, stream tokens to the client without buffering the
     full completion.
--   Do not claim that vLLM itself guarantees FIFO scheduling. The
-    application scheduler controls admission order; vLLM handles
-    inference batching and execution.
+-   Do not claim that the inference server itself guarantees FIFO scheduling. The
+    application scheduler controls admission order; Ollama handles
+    loading, batching and execution.
 -   Begin with one queue per model deployment. Document that FIFO is
     guaranteed within each queue, not necessarily globally across
     unrelated models.
@@ -343,7 +455,7 @@ Track every inference request with:
 -   Project ID.
 -   API key ID.
 -   Model/deployment ID.
--   Source: API gateway or coding workspace.
+-   Source: API gateway, with the client tool (OpenCode, Cline, ...) when detected.
 -   Input tokens.
 -   Output tokens.
 -   Total tokens.
@@ -354,15 +466,10 @@ Track every inference request with:
 -   Created, started and completed timestamps.
 -   Idempotency key where applicable.
 
-Separate these concepts:
-
--   **Inference request:** one model/API request.
--   **Agent task:** one user-assigned coding task.
--   **Agent execution:** one agent run or retry.
--   **Tool execution:** one shell, file, Git or other tool operation.
-
-A single agent task can create many inference requests and tool
-executions. Never count a coding task as only one model request.
+A single client session (for example a coding agent working for an hour) produces many inference
+requests. Nexora records and attributes every request individually; grouping requests into sessions
+is a reporting feature (a client-supplied session header, Phase 5), never a reason to skip per-request
+accounting.
 
 Analytics:
 
@@ -373,7 +480,7 @@ Analytics:
 -   Time to first token.
 -   Generation throughput.
 -   Success and failure rates.
--   Active users and workspaces.
+-   Active users and keys.
 -   Exportable CSV reports.
 
 ### 5.8 Request History
@@ -409,7 +516,7 @@ Alert types:
 -   Queue wait time above threshold.
 -   Token or request quota approaching limit.
 -   Quota exceeded.
--   Workspace worker unavailable.
+-   Deployment draining, failing over or flapping between healthy and unhealthy.
 -   Disk or memory pressure.
 -   Repeated authentication failures.
 -   Suspicious API-key usage.
@@ -419,158 +526,250 @@ later.
 
 ------------------------------------------------------------------------
 
-# PART II --- CUSTOM CODING WORKSPACE
+### 5.10 Activity Logging and Audit
 
-## 6. Coding Workspace Requirements
+Nexora keeps three complementary records, each append-only:
 
-The browser workspace is a first-class product module.
+-   **Request log** (`inference_requests`, `request_events`, `usage_records`): one row per model
+    request with attribution, model/deployment, tokens, queue wait, time to first token, duration,
+    status, error category and every state transition. *Implemented (Phases 3--4).*
+-   **Audit log** (`audit_logs`): privileged actions and authentication events. Database-enforced
+    append-only. *Implemented; tamper evidence below is planned.*
+-   **Activity feed**: a unified, filterable view over the above for administrators, team admins and
+    developers, scoped by role.
 
-### 6.1 Workspace layout
+Planned (Phase 5):
 
--   Left panel: project, repository, branch and file explorer.
--   Center panel: Monaco code editor with tabs and diff view.
--   Right panel: AI agent conversation, task progress and approvals.
--   Bottom panel: terminal, test results and execution logs.
+-   **Richer request context:** client IP, user agent / detected client tool (OpenCode, Cline, ...),
+    API key id, and the correlation id propagated to LiteLLM and Ollama so one request can be traced
+    end to end without exposing its content.
+-   **Tamper evidence:** each audit row stores a hash of its content and of the previous row
+    (hash chain); a verifier job and `GET /admin/audit-logs/verify` detect gaps or edits. The
+    existing trigger already blocks UPDATE and DELETE; the chain also covers superuser tampering.
+-   **Retention and archival:** configurable retention per record class (for example request log
+    13 months, audit log 7 years), monthly partitioning of high-volume tables, and a job that
+    archives expired partitions to compressed, encrypted files before dropping them.
+-   **Content logging is OFF by default.** Prompts and completions contain source code and
+    secrets. A super admin may enable it only per team or project, with: a recorded justification,
+    visible disclosure to affected users, field-level encryption, redaction of obvious secrets
+    (API keys, private-key blocks, tokens), a short retention window, restricted read access, and
+    an audit entry for every read. Without it, Nexora stores sizes and hashes only.
+-   **Export and integration:** CSV and JSON exports; streaming to a webhook or syslog/SIEM sink with
+    at-least-once delivery and a dead-letter table; no secrets in any export.
+-   **Anomaly and abuse signals:** unusual key use (new network, burst far above its baseline,
+    use outside normal hours), repeated authentication failures, quota-probing patterns. These raise
+    in-app alerts (Phase 4 mechanism) and are written to the audit log.
+-   **Cost-equivalent reporting:** token usage per team and project priced against a configurable
+    reference rate card, for internal showback (not billing).
 
-### 6.2 Project and repository integration
+Acceptance criteria:
 
--   Connect GitHub repositories.
--   Support repository selection and branch selection.
--   Clone into an isolated workspace.
--   Store credentials using encrypted, scoped secret storage.
--   Never expose repository tokens to the browser or LLM prompt.
--   Enforce project membership.
--   Record repository and branch used for each task.
+-   100% of gateway requests, including rejected and cancelled ones, leave a request-log record.
+-   Editing or deleting any audit row is detected by the verifier.
+-   Enabling content logging requires the documented policy fields and is itself audited.
+-   Exports never contain keys, tokens, passwords or (unless content logging is on) message content.
 
-GitHub integration should use least-privilege installation/app
-credentials where practical.
+---
 
-### 6.3 Agent task lifecycle
+# PART II --- ROUTING OPTIMIZATION
 
-Suggested lifecycle:
+## 6. Routing Optimization Requirements
 
-`PENDING → QUEUED → RUNNING → REVIEW_REQUIRED → APPROVED → COMMITTED`
+Today each model alias maps to one deployment with one FIFO queue. Routing optimization adds
+**multiple deployments per alias** and a policy that picks where each request runs, then uses the
+activity log to improve that policy over time. Principles:
 
-Additional terminal states:
+-   **Never change what the client asked for without a policy that allows it.** Routing chooses
+    *where* to run a model, not silently *which* model, unless an alias is explicitly defined as an
+    "auto" alias with documented rules.
+-   **Every decision is explainable.** Store the candidates considered, the scores, the policy
+    version and the reason for the choice, and expose them for each request.
+-   **Never replay a request of unknown outcome.** Failover happens only before dispatch, or after a
+    failure that is known not to have started generation (connection refused, deployment marked
+    unhealthy). After the first generated token, or when the outcome is unknown, the request fails
+    rather than being re-sent (see §47).
+-   **Preserve FIFO per deployment queue.** Routing decides the queue at admission; within a queue
+    order stays strict. Re-routing queued (not running) requests when a deployment turns unhealthy
+    preserves their original sequence relative to each other.
+-   **Reversible and safe to experiment with.** Policies are versioned, can run as a canary for a
+    percentage of traffic, and a single "freeze" switch returns to fixed routing instantly.
 
--   FAILED
--   CANCELLED
--   REJECTED
--   EXPIRED
+### 6.1 Deployments and capacity
 
-A task may have multiple executions. Each execution must retain its
-model requests, tool events, logs and final diff references.
+Each deployment records: host or node, endpoint reference (no credentials), enabled flag, weight,
+maximum active requests, context limit, capability tags (for example `long-context`, `fast`),
+health status from the Phase 4 checks, and optional drain mode (finish running work, accept none).
+Capacity has two levels, because Ollama shares a node's memory and compute across loaded models:
+a per-deployment limit (`max_active_requests`, at or below the node's `OLLAMA_NUM_PARALLEL`) and a
+per-node concurrency budget across all of that node's deployments. A request is dispatched only when
+both have room.
 
-### 6.4 Agent capabilities
+**Design decision: routing lives in Nexora, not in LiteLLM.** Each deployment is registered in LiteLLM
+under its own model name (for example `qwen3-coder@spark-a` and `qwen3-coder@spark-b`), and Nexora
+chooses which one to call. LiteLLM provides keys, provider adaptation and usage reporting but is
+not given two entries with the same name to balance, so its router and Nexora's never double-balance
+and every decision stays in Nexora's decision record and per-deployment FIFO queues. A key's model
+list in LiteLLM therefore contains every deployment name of the aliases it may use.
 
-Initial tools:
+**Equivalence rule.** Deployments of one alias must serve the same model build. The node sampler records
+each deployment's model digest and each node's Ollama version; deployments of an alias whose digests
+differ are flagged, raise an alert, and (configurable, default on) are excluded from routing until an
+administrator resolves it. This is also what makes failover and performance comparisons between nodes
+meaningful.
 
--   List and read files.
--   Search repository content.
--   Create and edit files.
--   Apply patches.
--   Run approved shell commands.
--   Run tests and linters.
--   Inspect Git status and diff.
--   Create a branch.
--   Commit changes after approval.
--   Push changes after explicit approval.
+Adding a DGX Spark node is: run Ollama on it, pull the models, register its deployments, set capacity
+from benchmarking, enable.
 
-### 6.5 Workspace isolation
+### 6.2 Routing strategies
 
--   One isolated container or equivalent execution environment per
-    active workspace.
--   Non-root execution.
--   CPU, RAM, disk and process limits.
--   No privileged containers.
--   No Docker socket mounted inside agent containers.
--   No host filesystem access outside approved workspace mounts.
--   Restrict outbound network access.
--   Block access to cloud metadata services and internal management
-    networks.
--   Use short-lived scoped repository credentials.
--   Record commands and execution results.
--   Destroy or suspend inactive workspaces according to policy.
+Configured per model alias, selectable and combinable:
 
-A separate Linux workspace worker is preferred over running untrusted
-agent commands on the DGX Spark.
+1.  **Fixed (default):** the first healthy deployment; today's behavior.
+2.  **Health-aware:** exclude unhealthy and draining deployments (always applied).
+3.  **Residency-aware (Ollama):** prefer a deployment whose model is already loaded on its node
+    (from the node's `/api/ps`), because a cold start can cost seconds to minutes and evicts another
+    model; fall back to a cold node only when the warm one is saturated, and account for the load time
+    in the decision.
+4.  **Least loaded:** score = (queued + active) / capacity per deployment; pick the lowest. Uses live
+    Redis queue state.
+5.  **Latency-aware:** exponentially weighted moving averages of time to first token and generation
+    tokens/sec per deployment, penalizing recent errors; avoids routing to a deployment that is
+    slow even if its queue looks short.
+6.  **Weighted round-robin:** operator-set weights, for gradual rollouts and uneven hardware.
+7.  **Context-length aware:** estimate input plus requested output tokens; route requests that exceed
+    a deployment's context or memory comfort zone to deployments tagged `long-context`.
+8.  **Workload lanes:** `interactive`, `coding` and `batch` lanes with reserved capacity per node, so document
+    extraction cannot starve the chatbot and a coding session cannot starve extraction; FIFO inside
+    each lane. The lane comes from the key's or project's workload class, never from client
+    self-declaration alone. Unused reserved capacity may be borrowed by other lanes and reclaimed when
+    its owner returns.
+9.  **Explicit fallback chain:** alias A may fall back to alias B (or deployment 2) only if an
+    administrator approved that exact fallback; the response carries a header naming the model that
+    actually served the request.
+10. **Auto alias (later, opt-in):** an alias such as `auto` that chooses between named models using
+    simple, inspectable rules (prompt length, tool-call presence, key tier). Off unless an admin
+    defines it; always labeled in the response and the log.
 
-### 6.6 Code review and Git controls
+Tie-breaking is deterministic (stable ordering by deployment id) so decisions are reproducible in
+tests and in the simulator.
 
--   Show changed files and unified diffs.
--   Allow per-file review.
--   Require user approval before commit.
--   Require explicit approval before push.
--   Show test results.
--   Preserve task and execution history.
--   Support rollback by creating a new corrective commit or reverting a
-    commit.
--   Never silently overwrite user changes.
+### 6.3 Ollama-specific behavior to design for
 
-------------------------------------------------------------------------
+Ollama differs from a batching inference server in ways the router must respect (to be confirmed on the
+actual nodes in Phase 0, since behavior varies by version):
+
+-   **Residency and load time.** `/api/ps` reports which models are loaded on a node and their memory
+    use; `/api/tags` lists what is installed. Nexora samples both per node and records load durations.
+-   **Keep-alive and warm-up.** Models unload after `OLLAMA_KEEP_ALIVE` of inactivity. Nexora can keep
+    a priority model warm with periodic lightweight requests, and warm a model before shifting traffic
+    to it, instead of letting the first user pay the cold start. Warm-ups are logged and never counted
+    against a user's quota.
+-   **Context length.** The default context window is small and, on the OpenAI-compatible endpoint, is
+    set by the model's configuration or an environment setting rather than per request. Long-document
+    extraction and coding sessions must run on models configured with enough context, and the router
+    treats a deployment's configured context as a hard limit (§6.2 context-length awareness).
+-   **Parallelism.** Requests beyond `OLLAMA_NUM_PARALLEL` queue inside Ollama; keep Nexora's limits at
+    or below it (§21.4). More parallel slots enlarge memory use per loaded model.
+-   **Usage reporting.** Verified on both nodes: streamed responses carry exact token usage through the
+    OpenAI-compatible endpoint and through LiteLLM. Nexora keeps its estimate-based fallback (and flags
+    such counts as estimated) for other backends or if a stream is cut short.
+-   **Native metrics.** Ollama's native API reports load, prompt-evaluation and generation durations and
+    token counts, which give time to first token and generation tokens per second per deployment.
+-   **No authentication or per-request identity.** The gateway is the only client that may reach it.
+
+### 6.4 Decision record and explainability
+
+For every routed request store: policy id and version, strategy, the candidate deployments with their
+inputs (queue depth, active, health, EWMA latency, weight), the chosen deployment, the reason, and
+whether it was a failover (and from where). Expose `GET /admin/routing/explain/{request_id}` and show
+the decision in the request detail view. Decisions are retained like the request log.
+
+### 6.5 Measurement and rollups
+
+A rollup job turns the request log into per-deployment windows (1 minute, 1 hour, 1 day): request
+count, error rate, queue wait p50/p95/p99, time to first token p50/p95, generation tokens/sec,
+maximum queue depth, utilization (active/capacity). These feed routing scores, dashboards, alerts and
+recommendations, and keep reporting fast as the request log grows.
+
+### 6.6 Recommendations and what-if simulation
+
+The system proposes changes and shows the evidence; an administrator applies or dismisses them.
+Examples: raise or lower a deployment's maximum active requests (queue wait p95 high while memory and
+time-to-first-token headroom exist); shift weight toward a faster node; add a replica for a model whose
+peak queue wait exceeds a threshold; mark a flaky deployment for investigation; recommend a context
+limit for long-prompt traffic.
+
+A **replay simulator** takes a window of the request log (arrival times, token counts, durations) and
+re-runs it against a candidate configuration (different concurrency, strategy or deployment set) to
+estimate queue wait and utilization *before* anything changes in production. Simulation assumes the
+logged service times; it is an estimate, and the UI says so.
+
+### 6.7 Safe rollout
+
+Policy changes are versioned and audited. A new policy can run on a canary percentage (chosen
+deterministically from the request id, so a request's arm is reproducible), is compared against the
+control on queue wait, time to first token and error rate, and can be promoted or rolled back with one
+action. The freeze switch overrides everything and routes with the fixed strategy.
+
+Acceptance criteria:
+
+-   A digest or version mismatch between deployments of one alias is detected within one sampling
+    interval and raises an alert; with the default policy the stale deployment is not routed to.
+-   With both nodes healthy and the target model resident on only one, residency-aware routing sends
+    requests there and avoids a cold load while it has capacity.
+-   A burst of document-extraction requests does not raise the chatbot's p95 time to first token beyond
+    its target (lane isolation), and the chatbot's reserved capacity is observable.
+-   With two healthy deployments and one slowed artificially, latency-aware and least-loaded routing
+    measurably reduce p95 queue wait compared with fixed routing in a load test.
+-   Killing a deployment mid-load causes no duplicate executions and no lost requests: queued requests
+    move, running ones finish or fail cleanly, and every move is recorded.
+-   Per-deployment FIFO order is preserved under concurrent admission and re-routing.
+-   Every routed request has a decision record; the explanation reproduces from stored inputs.
+-   The simulator's estimate for the *current* configuration is within an agreed tolerance of the
+    measured queue wait on the same window.
+-   Freeze returns to fixed routing within one routing cycle.
+
+---
 
 # PART III --- TECHNICAL ARCHITECTURE
 
 ## 7. Technology Stack
 
-  -----------------------------------------------------------------------
-  Layer                   Technology              Responsibility
-  ----------------------- ----------------------- -----------------------
-  Frontend                Next.js, React,         Portal and workspace UI
-                          TypeScript              
-
-  Editor                  Monaco Editor           Browser code editing
-
-  Backend                 Python FastAPI          Management and
-                                                  orchestration APIs
-
-  Database                PostgreSQL              Persistent business
-                                                  data
-
-  Cache/Queue             Redis                   FIFO queue, counters,
-                                                  events and locks
-
-  LLM gateway             LiteLLM Proxy           Virtual keys, model
-                                                  routing and usage
-
-  Inference               vLLM                    Local model serving
-
-  Execution               Docker                  Isolated coding
-                                                  workspaces
-
-  Reverse proxy           Nginx                   TLS and routing
-
-  Monitoring              Prometheus/Grafana      Metrics and dashboards
-
-  Logging                 Structured application  Troubleshooting and
-                          logs                    audit correlation
-  -----------------------------------------------------------------------
+| Layer | Technology | Responsibility |
+|---|---|---|
+| Frontend | Next.js, React, TypeScript | Portal and admin console |
+| Backend | Python FastAPI | Management, gateway and orchestration APIs |
+| Database | PostgreSQL | Persistent business data, request log, audit trail |
+| Cache/Queue | Redis | FIFO queues, counters, leases, routing state |
+| LLM gateway | LiteLLM Proxy | Virtual keys, model routing to backends, usage integration |
+| Inference | Ollama (two DGX Spark nodes) | Local model serving |
+| Reverse proxy | Nginx | TLS and routing |
+| Monitoring | Prometheus/Grafana | Metrics and dashboards |
+| Logging | Structured application logs | Troubleshooting and audit correlation |
 
 ### 7.1 Service boundaries
 
-1.  **Frontend:** Presentation and user interaction.
-2.  **FastAPI management service:** Identity, teams, projects, keys,
-    quotas, reports and administration.
-3.  **Scheduler service:** Admission control, FIFO queue, reservations,
-    cancellation and request lifecycle.
-4.  **LiteLLM:** Virtual-key verification, model routing and provider
-    usage integration.
-5.  **vLLM:** Model inference on DGX Spark.
-6.  **Workspace service:** Workspace lifecycle and controlled execution.
-7.  **Agent worker:** Agent loop and tool execution.
-8.  **PostgreSQL:** Durable source of truth.
-9.  **Redis:** Fast coordination and transient state.
+1.  **Frontend:** presentation and user interaction.
+2.  **FastAPI management service:** identity, teams, projects, keys, quotas, reports, administration.
+3.  **Gateway and scheduler:** OpenAI-compatible endpoints, admission control, quota reservations,
+    FIFO queues, cancellation and request lifecycle.
+4.  **Router:** deployment selection, health- and load-aware scoring, failover and decision records
+    (a module of the scheduler at first; separable if it needs to scale independently).
+5.  **Ops and analytics:** health checks, alert evaluation, rollups, recommendations, simulation.
+6.  **LiteLLM:** virtual-key verification and model routing to inference backends.
+7.  **Ollama:** model inference on DGX Spark nodes.
+8.  **PostgreSQL:** durable source of truth.
+9.  **Redis:** fast coordination and transient state.
 
-Avoid circular dependencies. The scheduler and workspace worker should
-call well-defined internal APIs rather than directly modifying unrelated
-service tables.
+Avoid circular dependencies. Components call well-defined internal interfaces rather than directly
+modifying each other's tables.
 
 ## 8. High-Level Architecture
 
 ``` text
-Developers
-  |-- Browser
-  |-- OpenCode / Cline / Goose / Aider
+Developers and tools
+  |-- Browser (portal, admin console)
+  |-- OpenCode / Cline / Goose / Aider (OpenAI-compatible clients)
   |
 Public HTTPS
   |
@@ -587,28 +786,22 @@ Nginx / WAF / Rate Limiting
           |
     Quota Reservation
           |
-    Redis FIFO Scheduler
+    Router  <------ live queue/health state, latency stats
+          |   (chooses a deployment; records the decision)
+          v
+    Redis FIFO queue (one per deployment)
           |
     LiteLLM Proxy
           |
     Private VPN / Application Network
           |
-    DGX Spark
-          |
-         vLLM
-          |
-      Local Model
+    DGX Spark node(s) -- Ollama -- Local models
 
-Workspace path:
-Next.js -> FastAPI -> Workspace Service -> Isolated Docker Worker
-                                      |
-                                  Agent Runtime
-                                      |
-                        Scheduler / LiteLLM / vLLM
+Every request is written to the request log (PostgreSQL) with its routing decision;
+rollups, alerts and recommendations are computed from that log.
 ```
 
-All model requests, including workspace agent requests, must be
-attributable to a user and project.
+All model requests must be attributable to a user, team, project and key.
 
 ## 9. Public and Private Network Design
 
@@ -620,8 +813,7 @@ Private services:
 -   PostgreSQL.
 -   Redis.
 -   LiteLLM administration.
--   vLLM.
--   Workspace control plane.
+-   Ollama.
 -   Prometheus and Grafana.
 
 Recommended deployment topology:
@@ -635,8 +827,7 @@ Recommended deployment topology:
   Redis              Private application network
   LiteLLM            Private application/inference network
   Scheduler          Private application network
-  DGX Spark/vLLM     Private VPN network
-  Workspace worker   Isolated execution network
+  DGX Spark/Ollama     Private network (never public)
 
 Use WireGuard or another managed private VPN to connect the application
 environment to DGX Spark.
@@ -651,7 +842,6 @@ Security controls:
 -   Network-level service isolation.
 -   WAF and ingress rate limits.
 -   Secrets manager or protected environment injection.
--   Workspace egress restrictions.
 -   Audit logs.
 -   Encrypted backups.
 -   Regular dependency and container image updates.
@@ -707,8 +897,6 @@ and explicit lifecycle states.
 -   team_id
 -   name
 -   description
--   repository_url
--   default_branch
 -   status
 -   created_at
 
@@ -744,6 +932,9 @@ and explicit lifecycle states.
 
 Do not store sensitive endpoint credentials in ordinary configuration
 JSON. Use secret references.
+
+Routing extends this table (Phase 6): `weight`, `enabled`, `draining`, `max_active_requests`,
+`context_limit`, `tags`, `node` (host label) and a unique `(model_id, deployment_name)` constraint.
 
 #### `api_keys`
 
@@ -838,83 +1029,53 @@ for Redis restarts.
 -   total_tokens
 -   recorded_at
 
-### 10.5 Coding workspace
+### 10.5 Routing and activity logging
 
-#### `workspaces`
+Planned (Phases 5--6). Tables are append-only unless stated.
 
--   id
--   user_id
--   project_id
--   repository_id
--   container_id
--   status
--   resource_profile
--   created_at
--   last_active_at
--   destroyed_at
-
-#### `repositories`
+#### `routing_policies`
 
 -   id
--   project_id
--   provider
--   repository_url
--   default_branch
--   credential_reference
--   created_at
-
-#### `repository_credentials`
-
--   id
--   user_id
--   project_id
--   provider
--   secret_reference
--   status
--   created_at
--   expires_at
-
-#### `agent_tasks`
-
--   id
--   workspace_id
--   user_id
--   project_id
--   title
--   prompt_reference
--   status
--   created_at
--   completed_at
-
-#### `agent_executions`
-
--   id
--   task_id
--   attempt_number
 -   model_id
--   status
--   started_at
--   completed_at
--   result_reference
+-   version
+-   strategy (fixed, least_loaded, latency_aware, weighted, composite)
+-   configuration JSONB (weights, thresholds, fallback chain, lanes, canary percentage)
+-   status (draft, canary, active, retired)
+-   created_by, created_at, activated_at
 
-#### `tool_executions`
+#### `routing_decisions`
 
--   id
--   execution_id
--   tool_name
--   status
--   command_reference
--   output_reference
--   started_at
--   completed_at
-
-#### `workspace_events`
-
--   id
--   workspace_id
--   event_type
--   event_data JSONB
+-   request_id
+-   policy_id, policy_version
+-   strategy
+-   chosen_deployment_id
+-   candidates JSONB (per deployment: queue depth, active, health, EWMA latency, weight, score)
+-   reason
+-   failover_from_deployment_id (nullable)
+-   arm (control or canary)
 -   created_at
+
+#### `deployment_metrics`
+
+Rollup of the request log per deployment and window (minute, hour, day): window_start, requests,
+errors, queue_wait_ms p50/p95/p99, time_to_first_token_ms p50/p95, generation_tokens_per_s,
+max_queue_depth, utilization. Rebuilt from `inference_requests` if lost.
+
+#### `routing_recommendations`
+
+-   id, kind (concurrency, weight, replica, context_limit, investigate)
+-   model_id, deployment_id
+-   summary, evidence JSONB (metric windows and the numbers behind the advice)
+-   status (open, applied, dismissed), decided_by, decided_at, created_at
+
+#### Activity logging additions
+
+-   `inference_requests`: add `client_ip`, `user_agent`, `client_tool`, `session_id`, `correlation_id`.
+-   `audit_logs`: add `prev_hash` and `row_hash` (hash chain).
+-   `content_logs` (only when content logging is enabled for a scope): request_id, encrypted
+    prompt/completion, redaction report, `retain_until`, `access_log` references.
+-   `log_sinks`: type (webhook, syslog), destination reference (secret), filters, status.
+-   `retention_policies`: record class, retention period, archive flag.
 
 ### 10.6 Administration and operations
 
@@ -1038,8 +1199,6 @@ Suggested error envelope:
   PATCH    `/projects/{id}`                     Update project
   POST     `/projects/{id}/members`             Add project member
   DELETE   `/projects/{id}/members/{user_id}`   Remove project member
-  POST     `/projects/{id}/repositories`        Connect repository
-  GET      `/projects/{id}/repositories`        List repositories
 
 ## 15. API Key APIs
 
@@ -1106,30 +1265,38 @@ that preserves the expected client contract.
   GET      `/usage/requests`       Request history
   GET      `/usage/export`         CSV export
 
-## 19. Workspace and Agent APIs
+## 19. Routing and Activity APIs
 
-  Method   Endpoint                           Purpose
-  -------- ---------------------------------- ---------------------------
-  POST     `/workspaces`                      Create workspace
-  GET      `/workspaces`                      List user's workspaces
-  GET      `/workspaces/{id}`                 Workspace status
-  DELETE   `/workspaces/{id}`                 Stop/destroy workspace
-  GET      `/workspaces/{id}/files`           Browse files
-  GET      `/workspaces/{id}/files/content`   Read file
-  PUT      `/workspaces/{id}/files/content`   Save file
-  POST     `/workspaces/{id}/terminal`        Execute permitted command
-  POST     `/agent/tasks`                     Submit coding task
-  GET      `/agent/tasks/{id}`                Task details
-  POST     `/agent/tasks/{id}/cancel`         Cancel task
-  GET      `/agent/tasks/{id}/events`         Task event stream
-  GET      `/agent/tasks/{id}/diff`           View changes
-  POST     `/agent/tasks/{id}/approve`        Approve changes
-  POST     `/agent/tasks/{id}/reject`         Reject changes
-  POST     `/agent/tasks/{id}/commit`         Commit changes
-  POST     `/agent/tasks/{id}/push`           Push approved changes
+Planned (Phases 5--6). All routing endpoints are super-admin only; activity endpoints are scoped by
+role (developers see their own, team admins their teams, super admins everything).
 
-Terminal endpoints must not be general host-shell proxies. They must
-execute only inside the authorized isolated workspace.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/admin/deployments` | List deployments with capacity, weight, health, load |
+| POST | `/admin/deployments` | Register a deployment |
+| PATCH | `/admin/deployments/{id}` | Weight, capacity, tags, enable, drain |
+| GET | `/admin/routing/policies` | List policies and versions |
+| POST | `/admin/routing/policies` | Create a draft policy |
+| POST | `/admin/routing/policies/{id}/canary` | Run on a percentage of traffic |
+| POST | `/admin/routing/policies/{id}/activate` | Promote |
+| POST | `/admin/routing/policies/{id}/rollback` | Return to the previous version |
+| POST | `/admin/routing/freeze` | Kill switch: fixed routing everywhere |
+| GET | `/admin/routing/decisions` | Search decisions |
+| GET | `/admin/routing/explain/{request_id}` | Why this deployment was chosen |
+| GET | `/admin/routing/metrics` | Per-deployment rollups |
+| GET | `/admin/routing/recommendations` | Open recommendations with evidence |
+| POST | `/admin/routing/recommendations/{id}/apply` | Apply a recommendation (audited) |
+| POST | `/admin/routing/recommendations/{id}/dismiss` | Dismiss |
+| POST | `/admin/routing/simulate` | Replay a log window against a candidate configuration |
+| GET | `/activity` | Role-scoped activity feed with filters |
+| GET | `/activity/export` | CSV or JSON export |
+| GET | `/admin/audit-logs/verify` | Verify the audit hash chain |
+| GET/PUT | `/admin/settings/content-logging` | Content-logging policy (default off) |
+| GET/POST/DELETE | `/admin/log-sinks` | Webhook and syslog destinations |
+| GET/PUT | `/admin/retention` | Retention policy per record class |
+
+Responses from `/v1/*` carry `x-nexora-request-id` (implemented) and, once routing exists,
+`x-nexora-deployment` and `x-nexora-model` so a client can see what actually served it.
 
 ## 20. Admin and Health APIs
 
@@ -1178,8 +1345,10 @@ ordering under concurrent producers.
 6.  Validate request size and output-token limit.
 7.  Atomically reserve request and estimated token capacity.
 8.  Create durable request record.
-9.  Insert request into its deployment FIFO queue.
-10. Return request identifier and queue state.
+9.  Route: the Router selects the target deployment (§6) and records the decision. With one
+    deployment per model this is trivial; with several it uses health, load and latency.
+10. Insert request into the chosen deployment's FIFO queue.
+11. Return request identifier and queue state.
 
 ### 21.2 Execution flow
 
@@ -1187,7 +1356,7 @@ ordering under concurrent producers.
 2.  Atomically claims the oldest queued request.
 3.  Marks request as processing.
 4.  Forwards it to LiteLLM.
-5.  LiteLLM routes to vLLM.
+5.  LiteLLM routes to Ollama.
 6.  Stream response to the client.
 7.  Record actual token consumption and timing.
 8.  Reconcile quota reservations.
@@ -1206,17 +1375,21 @@ ordering under concurrent producers.
 -   Record all state transitions.
 -   Define cancellation semantics for queued and active requests.
 
-### 21.4 FIFO and vLLM batching
+### 21.4 FIFO and Ollama concurrency
 
-FIFO applies to scheduler admission order. vLLM may batch and schedule
-token generation internally. Do not promise strict token-by-token
-completion ordering across concurrent requests.
+FIFO applies to scheduler admission order. Ollama runs up to `OLLAMA_NUM_PARALLEL` requests per
+loaded model at once and queues the rest internally (up to `OLLAMA_MAX_QUEUE`, after which it answers
+503). Nexora must keep that internal queue empty: a deployment's `max_active_requests` is set **at or
+below** the node's parallelism for that model, so waiting happens in Nexora's queue, where it is fair,
+cancellable, visible and measured, instead of invisibly inside Ollama. Do not promise strict
+token-by-token completion ordering across concurrent requests.
 
-Initial configuration must be benchmarked on the actual model and
-runtime. Start conservatively with a small concurrency limit, then
-increase it after measuring memory, latency and throughput.
+Several loaded models share one node's unified memory and compute, so the per-model limit is not the
+whole story: a node also has a total concurrency budget (§6.1). Initial configuration must be
+benchmarked on the actual models and Ollama settings. Start conservatively with small limits, then
+raise them after measuring memory, latency and throughput.
 
-------------------------------------------------------------------------
+---
 
 # PART VII --- FRONTEND DESIGN
 
@@ -1225,7 +1398,6 @@ increase it after measuring memory, latency and throughput.
 Navigation:
 
 -   Dashboard
--   Coding Workspace
 -   Projects
 -   API Keys
 -   Model Playground
@@ -1300,7 +1472,6 @@ Navigation:
 -   Request Queue
 -   Usage Analytics
 -   Quota Policies
--   Workspaces
 -   Alerts
 -   Audit Logs
 -   System Settings
@@ -1318,32 +1489,32 @@ Dashboard:
 -   Average time to first token.
 -   Average generation throughput.
 
-## 24. Coding Workspace UI
+## 24. Routing and Activity UI
 
-Layout:
+Planned (Phases 5--6).
 
--   Left: repository tree, branch selector and Git status.
--   Center: Monaco editor, tabs and diff viewer.
--   Right: AI chat, agent plan, task status and approval actions.
--   Bottom: terminal, build output, tests and logs.
+**Routing (admin):**
 
-Features:
+-   Deployments: health, capacity, weight, load, drain toggle, live queue depth per deployment.
+-   Policy editor: strategy and parameters with validation, canary controls, version history,
+    one-click rollback and a prominent freeze switch.
+-   Decision explorer: search by request, model, deployment or time; open any request to see its
+    candidates, scores and reason.
+-   Recommendations: each with the evidence chart, an *Apply* action, and the measured effect after
+    it was applied.
+-   Simulator: choose a log window and a candidate configuration, see estimated queue wait and
+    utilization next to the measured values, clearly labeled as an estimate.
 
--   Create task from natural-language prompt.
--   Select project and repository.
--   Select branch.
--   Show agent plan where supported.
--   Stream progress events.
--   Inspect file changes.
--   Review diff.
--   Run tests.
--   Approve/reject changes.
--   Commit and push only after explicit user action.
+**Activity:**
 
-Use WebSockets or Server-Sent Events for task and workspace updates. Use
-authentication and authorization for every event subscription.
+-   Unified feed with filters (actor, key, project, model, status, time), request detail with its
+    timeline and routing decision, and exports.
+-   Admin: audit-chain verification result, log sinks, retention policies, and the content-logging
+    policy page that states plainly what is stored and who can read it.
+-   Developers see their own activity and why a request waited or was routed elsewhere.
 
-------------------------------------------------------------------------
+Use Server-Sent Events or polling for live views, with authentication and authorization on every
+subscription.
 
 # PART VIII --- DEPLOYMENT AND INFRASTRUCTURE
 
@@ -1355,84 +1526,55 @@ authentication and authorization for every event subscription.
 -   TLS certificates.
 -   WAF or equivalent edge protection.
 -   Public DNS.
--   Ingress request-size and rate limits.
+-   Ingress request-size and rate limits (streaming responses need long read timeouts and
+    buffering disabled, or waiting streams are cut).
 
 ### Application server
 
 -   Next.js.
--   FastAPI.
--   Scheduler.
+-   FastAPI (management API, gateway, scheduler, router, ops).
 -   LiteLLM.
 -   PostgreSQL.
 -   Redis.
 -   Monitoring agents.
 
-### DGX Spark
+### DGX Spark node(s)
 
--   vLLM.
+-   Ollama (one deployment per model per node).
 -   Local model files.
 -   Private VPN interface.
--   GPU and model metrics.
+-   GPU and model metrics exporter (DCGM / node_exporter).
 
-### Workspace execution host
+Each additional node is registered as a deployment of the models it serves (§6.1). Keep inference
+nodes on the private network only; the application tier is the sole client.
 
--   Workspace control service.
--   Docker runtime.
--   Isolated containers.
--   Resource enforcement.
--   Restricted network egress.
-
-Prefer a separate execution host for untrusted agent commands. If the
-initial MVP uses the application server, enforce strong container
-isolation and resource limits.
-
-## 26. Suggested Repository Structure
+## 26. Repository Structure
 
 ``` text
 nexora/
 ├── apps/
-│   ├── web/                 # Next.js portal and workspace
-│   ├── api/                 # FastAPI management APIs
-│   ├── scheduler/           # FIFO admission and dispatch
-│   ├── workspace-service/   # Workspace lifecycle API
-│   └── agent-worker/        # Agent runtime and tools
-│
-├── packages/
-│   ├── api-client/
-│   ├── shared-types/
-│   └── ui/
+│   ├── api/                 # FastAPI: management, gateway, scheduler, router, ops
+│   └── web/                 # Next.js portal and admin console
 │
 ├── infra/
-│   ├── docker/
-│   ├── nginx/
-│   ├── litellm/
-│   ├── vllm/
-│   ├── wireguard/
-│   ├── monitoring/
-│   └── compose/
-│
-├── database/
-│   ├── migrations/
-│   ├── seeds/
-│   └── documentation/
+│   ├── litellm/             # LiteLLM configuration
+│   ├── mock-llm/            # mock LiteLLM/Ollama for local development
+│   ├── monitoring/          # Prometheus, alert rules, Grafana dashboards
+│   ├── backup/              # backup and restore-test scripts
+│   └── compose/             # local dependencies
 │
 ├── tests/
-│   ├── integration/
-│   ├── load/
-│   ├── security/
-│   └── end-to-end/
+│   └── e2e/                 # end-to-end demo of the first-release workflow
 │
 ├── docs/
-│   ├── architecture.md
-│   ├── api.md
-│   ├── deployment.md
-│   ├── security.md
-│   └── operations.md
+│   └── operations.md        # runbooks
 │
 ├── .env.example
 ├── README.md
-└── ROADMAP.md
+└── roadmap.md
 ```
+
+Database migrations live in `apps/api/migrations`; API tests in `apps/api/tests`.
 
 ## 27. Environment Variables
 
@@ -1449,17 +1591,16 @@ REDIS_URL=redis://...
 LITELLM_BASE_URL=http://litellm:4000
 LITELLM_MASTER_KEY=<secret>
 
-VLLM_BASE_URL=http://dgx-spark-private-ip:8000/v1
+# One entry per Ollama node (Ollama has no authentication: never expose it publicly)
+OLLAMA_DGX1_URL=http://127.0.0.1:10100
+OLLAMA_DGX2_URL=http://<dgx2-private-address>:10101
 
 JWT_SECRET=<secret>
 ENCRYPTION_KEY=<secret>
-
-WORKSPACE_SERVICE_URL=http://workspace-service:8002
 ```
 
 Do not commit actual secrets. Use separate credentials for database,
-LiteLLM administration, inference, Git provider access and workspace
-services.
+LiteLLM administration, inference and the metrics scrape token.
 
 ## 28. Port and Exposure Matrix
 
@@ -1471,8 +1612,7 @@ services.
   LiteLLM               4000 Internal
   PostgreSQL            5432 Internal
   Redis                 6379 Internal
-  vLLM                  8000 VPN/private only
-  Workspace service     8002 Internal
+  Ollama                  10100/10101 VPN/private only
   Prometheus            9090 Admin only
   Grafana               3001 Admin only
 
@@ -1481,25 +1621,21 @@ rules.
 
 ## 29. Deployment Sequence
 
-1.  Prepare application and workspace hosts.
+1.  Prepare application and inference hosts.
 2.  Configure private networking and VPN.
 3.  Deploy PostgreSQL.
 4.  Apply database migrations.
 5.  Deploy Redis.
-6.  Deploy LiteLLM.
-7.  Deploy vLLM on DGX Spark.
+6.  Deploy LiteLLM (with its own database; run its migrations on first start).
+7.  Deploy Ollama on DGX Spark.
 8.  Validate inference connectivity from the private network.
-9.  Deploy FastAPI.
-10. Deploy scheduler.
-11. Deploy Next.js.
-12. Configure administrator account and authentication.
-13. Deploy workspace service and isolated workers.
-14. Configure Nginx, DNS and TLS.
-15. Deploy monitoring and alerting.
-16. Run integration, load and security tests.
-17. Enable developer onboarding.
-
-------------------------------------------------------------------------
+9.  Deploy the FastAPI service (management, gateway, scheduler, router).
+10. Deploy Next.js.
+11. Configure the administrator account and authentication.
+12. Configure Nginx, DNS and TLS.
+13. Deploy monitoring and alerting; confirm a backup and a restore test.
+14. Run integration, load and security tests.
+15. Enable developer onboarding.
 
 # PART IX --- MONITORING, BACKUP AND OPERATIONS
 
@@ -1521,8 +1657,8 @@ Monitor:
 -   Time to first token.
 -   Generation duration.
 -   Failed and cancelled requests.
--   Workspace count.
--   Container CPU and RAM.
+-   Routing decisions, failovers and per-deployment error rate.
+-   Per-deployment queue depth, utilization and time to first token.
 -   Disk capacity.
 -   PostgreSQL connection and query health.
 -   Redis health and memory.
@@ -1537,7 +1673,6 @@ Alert on:
 -   Memory pressure.
 -   Repeated authentication failures.
 -   Abnormal key usage.
--   Workspace worker failure.
 -   Backup failure.
 
 ## 31. Backup and Recovery
@@ -1556,14 +1691,11 @@ Redis:
     record of requests or quota usage.
 -   Rebuild queue state from PostgreSQL after failure.
 
-Repositories and workspaces:
+Activity data:
 
--   Push approved work to Git.
--   Do not rely on workspace containers as the only copy of source
-    changes.
--   Define inactive workspace cleanup.
--   Preserve task metadata and approved diffs according to retention
-    policy.
+-   Request and audit logs live in PostgreSQL and are covered by its backups.
+-   Archived partitions (Phase 5) are encrypted, checksummed and restore-tested.
+-   Log sinks are delivery channels, not a system of record.
 
 Secrets:
 
@@ -1586,30 +1718,48 @@ Operations:
 
 ## 32. Delivery Strategy
 
-Build the central gateway first. The first useful milestone is:
+Build the central gateway first (done), then deepen what makes it valuable: trustworthy activity
+logging, then routing optimization driven by that data. The first useful milestone was:
 
-> An administrator creates a developer, assigns a project and quota,
-> generates an API key, and the developer successfully connects OpenCode
-> to the local DGX Spark through Nexora.
+> An administrator creates a developer, assigns a project and quota, generates an API key, and the
+> developer successfully connects OpenCode to the local DGX Spark through Nexora.
 
-After this milestone, build the custom browser workspace on the same
-identity, quota, scheduler and inference infrastructure.
+That workflow runs end to end today against the real LiteLLM proxy with a mock backend. Remaining
+risk is concentrated in two places: behavior on the real DGX Spark and Ollama (Phase 0 items), and the
+design of routing (Phase 6). Phases 5 and 6 can overlap: routing depends on the rollups and enriched
+request log that Phase 5 introduces.
 
-Estimated MVP: **5--8 weeks with two experienced engineers**, assuming
-inference infrastructure and an application host are available. This is
-a planning estimate, not a delivery guarantee.
+Estimates are planning figures, not delivery guarantees: Phase 5 about 1--2 weeks, Phase 6 about
+2--3 weeks, Phase 7 about 1 week, with two experienced engineers and a reachable DGX Spark.
 
 ## 33. Phase 0 --- Technical Validation and Project Setup
+
+**Status: partly done.** Done: LiteLLM-to-backend integration and streaming validated (LiteLLM 1.108.3
+in front of a mock Ollama); both real Ollama nodes confirmed reachable, and the LiteLLM-to-Ollama path
+verified on both with tiny requests (text, streaming usage, vision, per-deployment names, key
+allow-lists); version and model-digest differences found between the nodes, repository skeleton, CI, migrations, coding standards. **Open:** confirm
+DGX Spark OS/driver/CUDA, run the real Ollama nodes, benchmark the target models, confirm VPN connectivity and
+public DNS. These block real capacity numbers and the routing defaults.
 
 **Indicative duration:** 2--3 days
 
 Tasks:
 
 -   Confirm DGX Spark OS, driver, CUDA and container versions.
--   Validate selected vLLM version and model compatibility.
+-   Confirm the Ollama version on both nodes and the OpenAI-compatible endpoints Nexora relies on
+    (chat and completions, streaming, `stream_options.include_usage`, `/v1/models`).
 -   Benchmark candidate coding model configurations.
 -   Validate OpenAI-compatible streaming.
--   Validate LiteLLM-to-vLLM integration.
+-   Validate LiteLLM-to-Ollama integration (provider adapter and OpenAI-compatible endpoints) on both
+    nodes, including streaming and token usage in streamed responses.
+-   Reconcile the two nodes: identical Ollama versions and identical model digests (today they differ),
+    and decide which build is the reference.
+-   Record each node's Ollama settings (`OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`,
+    `OLLAMA_KEEP_ALIVE`, context length), installed models and available memory.
+-   Measure cold-load times and steady-state time to first token and tokens/sec per model per node,
+    alone and while the other workloads run (especially document extraction).
+-   Confirm Ollama is bound to localhost / a private interface only, and reachable from the gateway
+    host to DGX 2 and nowhere else.
 -   Confirm private VPN connectivity.
 -   Confirm public application host and DNS.
 -   Create Git repository and development environments.
@@ -1627,11 +1777,14 @@ Deliverables:
 Exit criteria:
 
 -   Model serves successfully on DGX Spark.
--   LiteLLM can route a test request to vLLM.
+-   LiteLLM can route a test request to Ollama.
 -   Streaming works from a private client.
 -   Public and private network boundaries are documented.
 
 ## 34. Phase 1 --- Foundation and Identity
+
+**Status: implemented and tested.** Deferred (needs email or identity-provider infrastructure):
+password reset and activation emails, MFA for administrators, OIDC/SSO.
 
 **Indicative duration:** Week 1
 
@@ -1667,12 +1820,16 @@ Exit criteria:
 
 ## 35. Phase 2 --- LiteLLM Gateway and API Keys
 
+**Status: implemented; validated against the real LiteLLM proxy.** Lessons recorded in tests: LiteLLM
+requires unique key aliases, and checks a key's model list against the model name in each request
+(Nexora creates keys with the model's LiteLLM name, not its alias).
+
 **Indicative duration:** Week 2
 
 Tasks:
 
 -   Deploy LiteLLM Proxy.
--   Connect LiteLLM to vLLM.
+-   Connect LiteLLM to Ollama.
 -   Register stable model aliases.
 -   Integrate LiteLLM virtual key APIs.
 -   Implement key creation and revocation.
@@ -1701,6 +1858,10 @@ Exit criteria:
 -   Master credentials are never returned to the client.
 
 ## 36. Phase 3 --- Quotas, Usage and FIFO Scheduler
+
+**Status: implemented.** Verified with real Redis: concurrent admission order, atomic reservations,
+cancellation (queued and running), client disconnects, lease expiry and recovery after a Redis wipe.
+Not yet measured on real hardware: the safe default concurrency per deployment.
 
 **Indicative duration:** Weeks 3--4
 
@@ -1741,6 +1902,11 @@ Exit criteria:
 
 ## 37. Phase 4 --- Admin Analytics and Operations
 
+**Status: implemented.** Admin dashboard, health checks through LiteLLM, auto-resolving alerts,
+Prometheus metrics, audit search, backup and restore-test scripts (exercised, including failure
+paths). Not verified: Prometheus rules and the Grafana dashboard against running instances, DGX GPU
+metrics, notification channels beyond in-app, WAL/PITR, off-host backup upload.
+
 **Indicative duration:** Week 4--5, overlapping with Phase 3
 
 Tasks:
@@ -1773,118 +1939,111 @@ Exit criteria:
 -   Backup restore has been tested.
 -   Queue and model health are visible.
 
-## 38. Phase 5 --- Coding Workspace Foundation
+## 38. Phase 5 --- Activity Logging Depth
 
-**Indicative duration:** Weeks 5--6
-
-Tasks:
-
--   Implement workspace lifecycle API.
--   Implement repository connection.
--   Implement scoped Git credentials.
--   Implement isolated Docker workspace provisioning.
--   Implement resource limits.
--   Implement file browser.
--   Integrate Monaco editor.
--   Implement secure file APIs.
--   Implement terminal execution inside workspace.
--   Implement workspace event streaming.
--   Implement workspace cleanup.
-
-Deliverables:
-
--   Browser-based project workspace.
--   Repository browsing.
--   Code editor.
--   Terminal.
--   Isolated execution environment.
-
-Exit criteria:
-
--   Developers can access only assigned repositories.
--   Workspaces are isolated.
--   Terminal commands execute inside the correct container.
--   Workspace resources are limited.
--   Workspace cleanup works.
-
-## 39. Phase 6 --- AI Agent and Git Workflow
-
-**Indicative duration:** Weeks 6--7
+**Indicative duration:** 1--2 weeks. **Status: planned.**
 
 Tasks:
 
--   Implement agent task lifecycle.
--   Implement agent worker.
--   Integrate model gateway.
--   Implement repository-aware context loading.
--   Implement file read/search/write tools.
--   Implement patch application.
--   Implement controlled shell execution.
--   Implement test execution.
--   Implement task event stream.
--   Implement diff viewer.
--   Implement approval/rejection workflow.
--   Implement branch and commit workflow.
--   Implement explicit push approval.
--   Record inference requests and tool executions per task.
+-   Enrich the request log: client IP, user agent and detected client tool, session id, correlation id
+    propagated to LiteLLM and Ollama.
+-   Audit hash chain, verifier job and `GET /admin/audit-logs/verify`.
+-   Retention policies and monthly partitioning for `inference_requests`, `request_events` and
+    audit data; archival of expired partitions to encrypted files.
+-   Unified activity feed API and UI with role-scoped filters and request timelines.
+-   Exports (CSV, JSON) and log sinks (webhook, syslog) with delivery retries and a dead-letter table.
+-   Content-logging policy: default off, per-scope opt-in with justification, disclosure, redaction,
+    field-level encryption, short retention, read auditing.
+-   Anomaly and abuse alerts: unusual key use, quota probing.
+-   Rollup job producing `deployment_metrics` (also required by Phase 6).
+-   Cost-equivalent reporting against a configurable rate card.
 
 Deliverables:
 
--   AI coding agent.
--   Task progress view.
--   Multi-file editing.
--   Test execution.
--   Diff review.
--   Approved Git commits.
+-   Complete, queryable, retention-managed request and audit records.
+-   Verifiable audit trail.
+-   Exports and integrations, and an explicit content-logging policy.
 
 Exit criteria:
 
--   Agent can complete a controlled multi-file coding task.
--   Every model request is attributable to the task and developer.
--   User can inspect and reject changes.
--   No commit or push occurs without the required approval.
--   Agent cannot escape its workspace.
+-   Every gateway request, including rejected and cancelled ones, has a request-log record with the
+    new context fields.
+-   Tampering with an audit row is detected by the verifier in a test.
+-   Retention and archival run without losing or duplicating rows; restoring an archive works.
+-   With content logging off (the default), no message content is persisted anywhere; with it on,
+    content is encrypted, redacted, access-audited and expires.
+-   Exports and sink payloads are free of secrets (tested with seeded fake secrets).
+
+## 39. Phase 6 --- Routing Optimization
+
+**Indicative duration:** 2--3 weeks. **Status: planned.** Requires at least two registered
+deployments to demonstrate (they may share hardware initially, or use a second node when available).
+
+Tasks:
+
+-   Multi-deployment registry with node and per-node capacity budget, weights, tags, drain, enable (§6.1).
+-   Node sampler: `/api/ps` residency, `/api/tags` inventory and model digests, Ollama version per node;
+    digest-mismatch detection and the equivalence rule (§6.1); warm-up and keep-alive manager.
+-   Workload classes on keys and projects, mapped to lanes with reserved capacity (§6.2).
+-   Move the existing document-extraction service behind the gateway with its own key and `batch` class,
+    pinned to DGX 2, then enable cross-node overflow in the stages described in §1.2.
+-   Router module: health-aware, residency-aware, least-loaded, latency-aware, weighted and context-length-aware
+    strategies with deterministic tie-breaking (§6.2).
+-   Routing decision records and `explain` API (§6.3).
+-   Failover before dispatch and re-routing of queued requests when a deployment turns unhealthy,
+    never replaying a request whose outcome is unknown.
+-   Optional priority lanes with reserved capacity; explicit, admin-approved fallback chains.
+-   Policy versioning, canary percentage, rollback and the freeze switch (§6.6).
+-   Per-deployment rollups, routing dashboards and alerts.
+-   Recommendations engine with evidence, apply/dismiss workflow, and measured follow-up (§6.5).
+-   Replay simulator and a benchmark harness (synthetic and replayed load).
+-   Response headers naming the deployment and model that served each request.
+
+Deliverables:
+
+-   Routing across multiple deployments with explainable decisions.
+-   Optimization recommendations and a simulator an administrator can trust and verify.
+-   Safe rollout controls.
+
+Exit criteria:
+
+-   Load tests show routing improves p95 queue wait and time to first token over fixed routing with an
+    uneven or degraded deployment.
+-   Killing a deployment under load loses no requests and executes none twice.
+-   Per-deployment FIFO is preserved under concurrent admission and re-routing.
+-   Every routed request has a decision record that reproduces from its stored inputs.
+-   Simulator error for the current configuration is within the agreed tolerance on a held-out window.
+-   Freeze restores fixed routing within one routing cycle.
 
 ## 40. Phase 7 --- Production Hardening and Launch
 
-**Indicative duration:** Week 8
+**Indicative duration:** about 1 week. **Status: planned.**
 
 Tasks:
 
--   Configure public DNS and HTTPS.
--   Configure WAF and ingress limits.
--   Complete network isolation.
+-   Validate on the real DGX Spark and Ollama: model configuration, concurrency defaults, streaming
+    through Nginx, long-context behavior; record the benchmark report.
+-   Configure public DNS and HTTPS, WAF and ingress limits; complete network isolation.
 -   Perform dependency and image security scans.
--   Perform authorization testing.
--   Perform workspace escape testing.
--   Perform API key leakage testing.
--   Perform quota race-condition tests.
--   Perform FIFO load tests.
--   Perform streaming disconnect tests.
--   Perform scheduler recovery tests.
--   Perform database restore test.
--   Perform concurrent developer benchmark.
--   Complete documentation.
--   Onboard pilot developers.
--   Collect feedback and fix critical defects.
+-   Perform authorization testing (broken object-level authorization, cross-team access).
+-   Perform API key leakage testing (logs, exports, errors, metrics).
+-   Perform quota race-condition, FIFO load, streaming disconnect and scheduler recovery tests on the
+    real stack.
+-   Perform database and LiteLLM-database restore tests; confirm alerting end to end.
+-   Run the concurrent-developer benchmark and publish capacity guidance only from measured data.
+-   Complete documentation and onboard pilot developers; collect feedback and fix critical defects.
 
 Deliverables:
 
--   Production deployment.
--   Security review.
--   Load-test report.
--   Recovery runbooks.
--   Developer onboarding guide.
+-   Production deployment, security review, load-test report, recovery runbooks and an onboarding guide.
 
 Exit criteria:
 
 -   All critical security tests pass.
--   Quotas and FIFO behavior are verified.
+-   Quotas, FIFO and routing behavior are verified on production-like hardware.
 -   No public access to private inference or data services.
--   Monitoring and backup recovery work.
--   Pilot developers can use both API and browser workspace.
-
-------------------------------------------------------------------------
+-   Monitoring, alerting and backup recovery work.
+-   Pilot developers use the gateway from their own tools.
 
 # PART XI --- TESTING AND ACCEPTANCE
 
@@ -1892,97 +2051,76 @@ Exit criteria:
 
 Test:
 
--   Login, logout, refresh and MFA.
+-   Login, logout, refresh, lockout and session revocation (MFA once implemented).
 -   Role and project authorization.
--   API key creation, rotation and revocation.
+-   API key creation, rotation and revocation (including at LiteLLM itself).
 -   Model permission enforcement.
--   Request and token quotas.
--   Quota reservation and reconciliation.
--   FIFO queue order.
--   Queue cancellation.
--   Streaming responses.
--   Request history.
--   Usage attribution.
--   Workspace creation and cleanup.
--   Repository access.
--   File operations.
--   Terminal execution.
--   Agent task lifecycle.
--   Diff approval.
--   Git commit and push approval.
+-   Request and token quotas; reservation and reconciliation.
+-   FIFO queue order; queue cancellation; queue-full and timeout behavior.
+-   Streaming responses, including clients that disconnect mid-stream.
+-   Request history and usage attribution.
+-   Activity feed scoping, exports and log sinks; retention and archival.
+-   Audit hash-chain verification (including detecting edits and deletions).
+-   Content logging off by default; policy, redaction, encryption and expiry when enabled.
+-   Routing: each strategy, deterministic tie-breaking, failover, drain, canary arms, freeze,
+    decision records and explanations.
+-   Recommendations and the simulator against known synthetic workloads.
 
 ## 42. Security Testing
 
 Test:
 
--   Broken object-level authorization.
--   Cross-team data access.
--   API key leakage.
--   Session theft and expiry.
--   CSRF and XSS protections.
--   SQL injection.
--   SSRF.
--   Workspace container escape.
--   Host filesystem access.
--   Docker socket exposure.
--   Cloud metadata access.
--   Internal network scanning from workspace.
--   Secret leakage in logs.
--   Excessive request and token consumption.
--   Admin privilege escalation.
+-   Broken object-level authorization and cross-team data access (requests, activity, decisions).
+-   API key leakage (logs, exports, metrics, errors, audit entries).
+-   Session theft and expiry; CSRF and XSS protections.
+-   SQL injection; SSRF through webhook log sinks (block internal and metadata addresses).
+-   Secret leakage in logs, exports and sink payloads (seed fake secrets and search for them).
+-   CSV and log injection in exported fields.
+-   Content-log access control and read auditing.
+-   Excessive request and token consumption; quota probing.
+-   Admin privilege escalation; routing and policy changes by non-admins.
+-   Header spoofing of client identity, priority lane or deployment.
 
 ## 43. Load Testing
 
-Benchmark with realistic OpenCode and agent workloads.
+Benchmark with realistic client workloads (OpenCode and similar agents).
 
 Test dimensions:
 
 -   1, 2, 4, 8 and higher concurrent developers.
--   Short chat requests.
--   Long-context requests.
--   Long output requests.
--   Streaming requests.
--   Multiple concurrent agent tasks.
--   Queue bursts.
--   Client disconnects.
--   Scheduler restarts.
--   Model unavailability.
+-   Short chat requests; long-context requests; long output requests; streaming requests.
+-   Queue bursts; client disconnects; scheduler restarts.
+-   Model or deployment unavailability, and recovery.
+-   Uneven deployments (one slow, one failing) to evaluate each routing strategy.
 
 Measure:
 
--   Requests/sec.
--   Input and output tokens/sec.
--   Queue wait time.
--   Time to first token.
--   End-to-end completion time.
--   Error rate.
--   GPU/unified memory utilization.
--   CPU and memory consumption.
--   Workspace resource usage.
+-   Requests/sec, input and output tokens/sec.
+-   Queue wait time (p50/p95/p99), time to first token, end-to-end completion time.
+-   Error and failover rate, duplicate-execution count (must be zero).
+-   GPU/unified memory utilization; CPU and memory of the application tier.
+-   Request-log write latency and rollup job duration.
 
-Do not publish a developer capacity promise until the actual selected
-model and inference configuration have been tested.
+Do not publish a developer capacity promise until the actual selected model and inference
+configuration have been tested.
 
 ## 44. Definition of Done
 
-Nexora MVP is ready for organizational rollout when:
+Nexora is ready for organizational rollout when:
 
--   Developers can independently obtain API keys.
--   Revoked keys are rejected.
--   User, team and key quotas are enforced.
--   FIFO order is verified.
--   Streaming works with supported clients.
--   Requests are fully attributable.
--   Usage reports are correct.
--   Workspace isolation passes security tests.
--   Git changes require approval.
--   Admins can inspect queue and inference health.
--   Public access is HTTPS-only.
--   Private services are inaccessible from the internet.
--   Backups and recovery are tested.
--   Monitoring and alerting are operational.
+-   Developers can independently obtain API keys, and revoked keys are rejected everywhere.
+-   User, team and key quotas are enforced; FIFO order is verified.
+-   Streaming works with the supported clients.
+-   Requests are fully attributable and usage reports are correct.
+-   Activity logs are complete, retention-managed and tamper-evident; content logging is off unless
+    deliberately enabled under policy.
+-   Routing decisions are explainable, failover never duplicates execution, and routing can be frozen.
+-   Admins can inspect queue, deployment health and routing decisions.
+-   Public access is HTTPS-only; private services are inaccessible from the internet.
+-   Backups and recovery are tested; monitoring and alerting are operational.
+-   Behavior has been validated on the real DGX Spark and Ollama.
 
-------------------------------------------------------------------------
+---
 
 # PART XII --- ENGINEERING STANDARDS
 
@@ -2009,9 +2147,7 @@ Use a common request correlation ID across:
 -   FastAPI.
 -   Scheduler.
 -   LiteLLM.
--   vLLM.
--   Workspace service.
--   Agent worker.
+-   Ollama.
 
 The correlation ID must allow an administrator to trace an inference
 request without exposing private prompts or secrets.
@@ -2021,10 +2157,9 @@ request without exposing private prompts or secrets.
 -   PostgreSQL is the durable source of truth.
 -   Redis is recoverable queue and coordination state.
 -   LiteLLM is the gateway and virtual-key provider.
--   vLLM is the inference engine.
--   Workspace workers are isolated and disposable.
--   Agent tasks and inference requests are separate entities.
+-   Ollama is the inference engine.
 -   Every state transition should be observable.
+-   Every routing decision is recorded and explainable; routing can always be frozen to a fixed policy.
 -   Every retry must be idempotent or explicitly classified as a new
     attempt.
 -   Do not silently replay a model request when the original completion
@@ -2032,124 +2167,76 @@ request without exposing private prompts or secrets.
 
 ## 48. Future Enhancements
 
-After the MVP:
+After the core scope:
 
--   Multiple DGX Spark inference nodes.
--   Model-aware load balancing.
--   Per-model queue tuning.
--   Additional local models.
--   Team-level model preferences.
--   Advanced agent profiles.
--   Reusable project instructions.
--   MCP server integrations.
--   GitHub issue-to-agent workflows.
--   Pull request creation.
--   Scheduled agent tasks.
--   Team cost-equivalent reporting.
--   Advanced prompt and tool governance.
--   Model evaluation and regression testing.
--   Multi-node inference monitoring.
--   Optional private document retrieval/RAG.
--   Additional AI workloads beyond coding.
+-   Multiple DGX Spark inference nodes beyond the first replica pair, and cross-site routing.
+-   Auto-selection aliases with transparent, inspectable rules.
+-   Per-team model preferences and team-level routing policies.
+-   Additional local models and model evaluation/regression testing on logged traffic (with consent).
+-   Speculative recommendations from cost-equivalent trends (capacity planning).
+-   Prefix-cache and session-affinity routing if Ollama exposes the signals needed.
+-   Email and chat notification channels for alerts.
+-   SSO (OIDC) and administrator MFA.
+-   Private document retrieval (RAG) as a separate, opt-in service.
+-   Additional AI workloads beyond text generation (embeddings, speech).
 
-------------------------------------------------------------------------
-
-# PART XIII --- INITIAL PROJECT BACKLOG
+# PART XIII --- BACKLOG
 
 ## 49. Epic Breakdown
 
-  Epic                             Priority   Key deliverables
-  -------------------------------- ---------- ----------------------------------
-  E01 --- Project Foundation       P0         Repositories, CI, configuration
-  E02 --- Authentication           P0         Login, sessions, roles
-  E03 --- Organization             P0         Teams, users, projects
-  E04 --- Model Gateway            P0         LiteLLM and vLLM integration
-  E05 --- API Keys                 P0         Provisioning and revocation
-  E06 --- Quotas                   P0         Atomic request/token controls
-  E07 --- FIFO Scheduler           P0         Queue, dispatch and cancellation
-  E08 --- Usage Metering           P0         Token and request attribution
-  E09 --- Admin Portal             P0         User, model and queue management
-  E10 --- Developer Portal         P0         Keys, usage and request history
-  E11 --- Monitoring               P0         Metrics, alerts and logs
-  E12 --- Workspace Service        P1         Isolated environments
-  E13 --- Repository Integration   P1         GitHub connection
-  E14 --- Code Editor              P1         Monaco and file management
-  E15 --- Agent Runtime            P1         Agent loop and tool execution
-  E16 --- Diff and Approval        P1         Review and Git workflow
-  E17 --- Production Hardening     P0         Security, backups and load tests
+| Epic | Priority | Key deliverables | Status |
+|---|---|---|---|
+| E01 --- Project Foundation | P0 | Repository, CI, configuration | Done |
+| E02 --- Authentication | P0 | Login, sessions, roles | Done (MFA/SSO deferred) |
+| E03 --- Organization | P0 | Teams, users, projects | Done |
+| E04 --- Model Gateway | P0 | LiteLLM and Ollama integration | Done (real Ollama open) |
+| E05 --- API Keys | P0 | Provisioning and revocation | Done |
+| E06 --- Quotas | P0 | Atomic request/token controls | Done |
+| E07 --- FIFO Scheduler | P0 | Queue, dispatch, cancellation, recovery | Done |
+| E08 --- Usage Metering | P0 | Token and request attribution | Done |
+| E09 --- Admin Portal | P0 | Users, models, queue, alerts, audit | Done |
+| E10 --- Developer Portal | P0 | Keys, usage, request history | Done |
+| E11 --- Monitoring | P0 | Metrics, alerts, backups | Done (Grafana/Prometheus unverified) |
+| E12 --- Activity Logging | P0 | Enriched log, hash chain, retention, feed, exports, content policy | Planned (Phase 5) |
+| E13 --- Routing | P0 | Multi-deployment router, decisions, failover, canary, freeze | Planned (Phase 6) |
+| E14 --- Optimization | P1 | Rollups, recommendations, simulator, benchmark harness | Planned (Phase 6) |
+| E15 --- Production Hardening | P0 | Real-hardware validation, security and load tests | Planned (Phase 7) |
 
-P0 items are required for the gateway MVP and production foundation. P1
-items complete the custom coding workspace.
+## 50. Sprint Plan
 
-## 50. Initial Sprint Plan
+Sprints 1--4 (foundation, gateway and keys, quotas and scheduler, analytics and operations) are
+complete. Remaining:
 
-### Sprint 1
+### Sprint 5 --- Activity logging
 
--   Repository and CI setup.
--   PostgreSQL schema.
--   FastAPI foundation.
--   Next.js foundation.
--   Authentication.
--   Roles and permissions.
--   Teams and projects.
+-   Request-log enrichment and correlation ids.
+-   Audit hash chain and verifier.
+-   Rollup job and retention/partitioning.
+-   Activity feed and exports.
 
-### Sprint 2
+### Sprint 6 --- Log policy and routing core
 
--   LiteLLM integration.
--   vLLM model registration.
--   API key provisioning.
--   Key revocation.
--   OpenAI-compatible model listing and completion.
--   OpenCode integration.
+-   Content-logging policy, log sinks, anomaly alerts.
+-   Multi-deployment registry; router with health-aware and least-loaded strategies; decision records.
 
-### Sprint 3
+### Sprint 7 --- Routing optimization
 
--   Quota policy resolution.
--   Atomic quota reservations.
--   Redis FIFO queue.
--   Request lifecycle.
--   Streaming.
--   Cancellation and recovery.
+-   Latency-aware and weighted strategies, failover and queued re-routing, canary and freeze.
+-   Recommendations and the replay simulator; routing dashboards.
 
-### Sprint 4
+### Sprint 8 --- Hardening
 
--   Usage dashboards.
--   Request history.
--   Admin screens.
--   Monitoring and alerts.
--   Load testing and gateway MVP acceptance.
-
-### Sprint 5
-
--   Workspace service.
--   Docker isolation.
--   Repository integration.
--   File explorer and Monaco.
-
-### Sprint 6
-
--   Agent runtime.
--   File and terminal tools.
--   Task progress.
--   Diff and approval.
--   Git integration.
-
-### Sprint 7--8
-
--   Security hardening.
--   Performance tuning.
--   Recovery testing.
--   Pilot rollout.
--   Documentation and production launch.
+-   Real DGX Spark and Ollama validation, security and load testing, recovery testing.
+-   Documentation, pilot rollout and launch.
 
 Sprint assignments may overlap based on team size and dependencies.
 
-------------------------------------------------------------------------
+---
 
 # 51. First Release Priorities
 
-The first release must prioritize the shared inference platform rather
-than the coding UI.
+**Status: demonstrated** (steps 1--18 below run in `tests/e2e/demo.py` against the real LiteLLM proxy
+with a mock inference backend; repeat against the real DGX Spark in Phase 7).
 
 The first end-to-end demonstration should be:
 
@@ -2165,7 +2252,7 @@ The first end-to-end demonstration should be:
 10. Developer sends a coding request.
 11. Nexora authenticates the key.
 12. Scheduler checks quota and queues the request.
-13. LiteLLM routes to vLLM on DGX Spark.
+13. LiteLLM routes to Ollama on DGX Spark.
 14. Response streams back to OpenCode.
 15. Usage is recorded.
 16. Developer sees consumption in the portal.
@@ -2173,37 +2260,36 @@ The first end-to-end demonstration should be:
 18. When quota is exceeded, further requests are rejected with a clear
     error.
 
-This is the minimum complete business workflow and should be
-demonstrated before investing heavily in the browser coding workspace.
+This is the minimum complete business workflow; it is the baseline that activity logging and
+routing optimization build on.
 
 ------------------------------------------------------------------------
 
 # 52. Final Architecture Decision Summary
 
-  Decision          Selected approach
-  ----------------- -----------------------------------------------
-  Product           Nexora
-  Access            API gateway + browser coding workspace
-  Frontend          Next.js, React, TypeScript
-  Backend           FastAPI
-  Database          PostgreSQL
-  Queue             Redis-backed FIFO scheduler
-  Gateway           LiteLLM Proxy
-  Inference         vLLM on DGX Spark
-  Coding model      Configurable local coding model
-  Workspace         Isolated Docker execution
-  Authentication    Secure sessions, MFA for admins
-  API credentials   LiteLLM virtual keys
-  Quotas            Request and token limits
-  Scheduling        FIFO per model deployment
-  Usage             Per request, user, team, project and key
-  Network           Public HTTPS ingress, private service network
-  DGX access        Private VPN
-  Monitoring        Prometheus and Grafana
-  Delivery          Gateway MVP first, coding workspace second
+| Decision | Selected approach |
+|---|---|
+| Product | Nexora |
+| Purpose | Model access, activity logging, routing optimization |
+| Access | OpenAI-compatible API gateway with virtual keys |
+| Frontend | Next.js, React, TypeScript |
+| Backend | FastAPI |
+| Database | PostgreSQL |
+| Queue | Redis-backed FIFO scheduler, one queue per deployment |
+| Gateway | LiteLLM Proxy |
+| Inference | Ollama on DGX Spark (more nodes later) |
+| Routing | Deployment selection by health, load and latency; explainable, versioned, freezable |
+| Optimization | Rollups, recommendations with evidence, replay simulator |
+| Authentication | Secure sessions (MFA for admins planned) |
+| API credentials | LiteLLM virtual keys, stored only as hashes |
+| Quotas | Request and token limits, atomic reservation |
+| Scheduling | FIFO per deployment queue |
+| Logging | Per-request log, append-only audit with hash chain, content off by default |
+| Network | Public HTTPS ingress, private service network |
+| DGX access | Private VPN |
+| Monitoring | Prometheus and Grafana, in-app alerts |
+| Delivery | Gateway first, then activity depth, then routing |
 
-**Final product objective:** Nexora will be the organization's
-centralized, secure, multi-user AI development infrastructure. It will
-provide controlled access to local LLMs, transparent usage accounting,
-fair FIFO admission, isolated coding workspaces and an extensible
-foundation for future internal AI applications.
+**Final product objective:** Nexora will be the organization's single, secure and observable way to
+use its own language models: every request attributable, every action logged, and every routing
+decision explainable, with the data to keep improving how the hardware is used.

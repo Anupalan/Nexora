@@ -21,7 +21,7 @@ scrape_configs:
     static_configs:
       - targets: ["DGX_SPARK_PRIVATE_IP:9400"]
 
-  - job_name: node                   # node_exporter on each host (app server, DGX Spark, workspace host)
+  - job_name: node                   # node_exporter on each host (application server and each DGX Spark node)
     static_configs:
       - targets: ["app-host:9100", "DGX_SPARK_PRIVATE_IP:9100"]
 

@@ -1,9 +1,10 @@
 # Nexora
 
-**One Platform. Every Intelligence.** Unified access to AI models, coding agents and intelligent
-workflows — Model Gateway · AI Workspace · Agent Orchestration · Usage Intelligence.
+**One Platform. Every Intelligence.** Controlled access to your own AI models, a complete record of
+how they are used, and routing that keeps them fast — Model Gateway · Activity Intelligence ·
+Routing Optimization.
 
-Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phase 4 (admin analytics and operations)** on top of Phases 1–3. See `docs/operations.md`.
+Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phases 0–4 implemented** (gateway, keys, quotas, FIFO queue, usage, admin operations). Next: activity-logging depth (Phase 5) and routing optimization (Phase 6). See `docs/operations.md` for runbooks.
 
 ## Layout
 - `apps/api` — FastAPI management API (auth, RBAC, users, teams, projects, audit), Alembic migrations
@@ -42,7 +43,7 @@ rules and a Grafana dashboard under `infra/monitoring`; **backup and restore-tes
 Not verified / not done: GPU and unified-memory panels need the DGX Spark's DCGM exporter (not available
 here); the Prometheus rules and Grafana dashboard are syntax-checked but were not loaded into running
 Prometheus/Grafana (no Docker here); no email/webhook notification channels; no WAL/PITR; no
-off-host upload in the backup script; workspace-worker health arrives with the workspace (Phase 5).
+off-host upload in the backup script; per-deployment routing metrics arrive with Phase 6.
 
 ## Local end-to-end demo (roadmap §51)
 `infra/mock-llm` is a mock LiteLLM + vLLM (virtual keys with model allow-lists, streaming, usage) for

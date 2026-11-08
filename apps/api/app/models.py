@@ -118,8 +118,6 @@ class Project(Base):
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="RESTRICT"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    repository_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    default_branch: Mapped[str] = mapped_column(String(200), default="main")
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -252,7 +250,7 @@ class InferenceRequest(Base):
         ForeignKey("api_keys.id", ondelete="RESTRICT"), nullable=True)
     model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id", ondelete="RESTRICT"))
     deployment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("model_deployments.id", ondelete="RESTRICT"))
-    source: Mapped[str] = mapped_column(String(20), default="api")  # api | workspace
+    source: Mapped[str] = mapped_column(String(20), default="api")
     status: Mapped[str] = mapped_column(String(20), default="queued")
     stream: Mapped[bool] = mapped_column(Boolean, default=False)
     queue_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -315,3 +313,4 @@ class Alert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)  # null = auto-resolved
+

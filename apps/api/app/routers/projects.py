@@ -60,8 +60,7 @@ def create_project(body: ProjectCreate, actor: User = Depends(current_user),
     team = get_team_or_404(db, actor, body.team_id)
     if not is_team_admin(db, actor, team.id):
         raise ApiError(403, "FORBIDDEN", "Team admin access required.")
-    project = Project(team_id=team.id, name=body.name, description=body.description,
-                      repository_url=body.repository_url, default_branch=body.default_branch)
+    project = Project(team_id=team.id, name=body.name, description=body.description)
     db.add(project)
     try:
         db.flush()

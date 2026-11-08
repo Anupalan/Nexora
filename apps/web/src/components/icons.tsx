@@ -20,10 +20,9 @@ export const IconQueue = P(<><path d="M4 6h16M4 12h16M4 18h10" /><circle cx="19"
 export const IconGauge = P(<><path d="M4 16a8 8 0 1 1 16 0" /><path d="M12 16l4-5" /><circle cx="12" cy="16" r="1.2" /></>);
 export const IconShield = P(<><path d="M12 3l8 3v6c0 4.4-3.2 8-8 9-4.8-1-8-4.6-8-9V6z" /><path d="M9 12l2 2 4-4" /></>);
 export const IconLogout = P(<><path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4" /><path d="M16 8l4 4-4 4M20 12H9" /></>);
-export const IconCode = P(<><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" /></>);
-export const IconBot = P(<><rect x="4" y="8" width="16" height="11" rx="3" /><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6" /></>);
 export const IconGateway = P(<><circle cx="5" cy="12" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><path d="M7 12h4l6-5M11 12l6 5" /></>);
 export const IconInbox = P(<><path d="M3 13l3-8h12l3 8" /><path d="M3 13v6h18v-6h-5a4 4 0 0 1-8 0z" /></>);
 export const IconBell = P(<><path d="M6 9a6 6 0 1 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z" /><path d="M10 20a2 2 0 0 0 4 0" /></>);
 export const IconServer = P(<><rect x="3" y="4" width="18" height="6" rx="2" /><rect x="3" y="14" width="18" height="6" rx="2" /><path d="M7 7h.01M7 17h.01" /></>);
 export const IconActivity = P(<path d="M3 12h4l3-8 4 16 3-8h4" />);
+export const IconRoute = P(<><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="6" r="2.2" /><path d="M8 18h6a3 3 0 0 0 0-6h-4a3 3 0 0 1 0-6h6" /></>);

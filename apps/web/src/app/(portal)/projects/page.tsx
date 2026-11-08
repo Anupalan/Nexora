@@ -16,10 +16,10 @@ export default function Projects() {
           <EmptyState icon={<IconFolder />} title="No projects yet" hint="Ask a team admin to add you to a project." />
         ) : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Repository</th><th>Branch</th><th>Status</th></tr></thead>
+            <thead><tr><th>Name</th><th>Description</th><th>Status</th></tr></thead>
             <tbody>{rows.map((p) => (
-              <tr key={p.id}><td><b>{p.name}</b></td><td className="muted">{p.repository_url ?? "—"}</td>
-                <td><code>{p.default_branch}</code></td><td><Badge value={p.status} /></td></tr>
+              <tr key={p.id}><td><b>{p.name}</b></td><td className="muted">{p.description ?? "—"}</td>
+                <td><Badge value={p.status} /></td></tr>
             ))}</tbody>
           </table></div>
         )}

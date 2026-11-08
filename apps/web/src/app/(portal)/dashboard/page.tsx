@@ -5,13 +5,12 @@ import { useEffect, useState } from "react";
 import { api, type Project, type Team, type UsageReport } from "@/lib/api";
 import { useUser } from "@/lib/session";
 import { Badge, PageHeader, Stat } from "@/components/ui";
-import { IconBot, IconChart, IconCode, IconFolder, IconGateway, IconKey, IconQueue, IconTeam } from "@/components/icons";
+import { IconChart, IconFolder, IconGateway, IconKey, IconQueue, IconRoute, IconTeam } from "@/components/icons";
 
 const PILLARS = [
   { t: "Model Gateway", d: "OpenAI-compatible API with virtual keys, quotas and a fair FIFO queue.", s: "live", I: IconGateway, href: "/keys" },
-  { t: "AI Workspace", d: "Browser coding workspace with isolated environments.", s: "planned", I: IconCode },
-  { t: "Agent Orchestration", d: "Coding agents with review, approval and Git workflows.", s: "planned", I: IconBot },
-  { t: "Usage Intelligence", d: "Per-request metering by user, team, project and key.", s: "live", I: IconChart, href: "/usage" },
+  { t: "Activity Intelligence", d: "Every request metered and attributed; deeper logging, retention and exports are next.", s: "live", I: IconChart, href: "/usage" },
+  { t: "Routing Optimization", d: "Pick the best deployment per request, explain it, and recommend tuning from your own data.", s: "planned", I: IconRoute },
 ];
 
 export default function Dashboard() {

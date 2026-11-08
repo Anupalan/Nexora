@@ -16,7 +16,7 @@ In-app alert types: `inference_unavailable` (critical), `queue_depth_high`, `que
 `quota_approaching` (≥90% of a day/month limit), `quota_exceeded`, `repeated_auth_failures`
 (≥10 failed sign-ins in 10 minutes). Thresholds: `ALERT_*` settings in `.env.example`. Dismissing an
 alert by hand is audited; if the condition persists it re-opens on the next cycle.
-Not yet implemented: email/other notification channels, workspace-worker and disk/memory in-app
+Not yet implemented: email/other notification channels, disk/memory in-app
 alerts (use the Prometheus rules), suspicious-key-usage detection.
 
 ## Backups (PostgreSQL is the durable source of truth)

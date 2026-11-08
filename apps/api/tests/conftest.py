@@ -135,8 +135,8 @@ class Api:
     def patch(self, url, json=None):
         return self.c.patch(f"/api/v1{url}", json=json, headers=self._h())
 
-    def delete(self, url):
-        return self.c.delete(f"/api/v1{url}", headers=self._h())
+    def delete(self, url, **kw):
+        return self.c.delete(f"/api/v1{url}", headers=self._h(), **kw)
 
 
 @pytest.fixture

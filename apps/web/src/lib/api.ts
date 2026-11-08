@@ -11,8 +11,7 @@ export interface User {
 }
 export interface Team { id: string; name: string; status: string; created_at: string }
 export interface Project {
-  id: string; team_id: string; name: string; description: string | null;
-  repository_url: string | null; default_branch: string; status: string; created_at: string;
+  id: string; team_id: string; name: string; description: string | null; status: string; created_at: string;
 }
 export interface AuditLog {
   id: string; actor_id: string | null; action: string; entity_type: string;
