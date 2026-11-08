@@ -179,8 +179,8 @@ def test_metrics_disabled_until_token_set_and_protected(gw, monkeypatch):  # noq
     gw["llm"].unhealthy = True
     gw["root"].post("/admin/inference/check")
     body = c.get("/metrics", headers=bearer("scrape-secret")).text
-    for needle in ('nexora_up 1.0', 'nexora_queue_depth{model="coder"} 0.0',
-                   'nexora_model_healthy{model="coder"} 0.0', 'nexora_requests_total{model="coder",status="completed"} 1.0',
+    for needle in ('nexora_up 1.0', 'nexora_queue_depth{deployment="default",model="coder",node=""} 0.0',
+                   'nexora_model_healthy{deployment="default",model="coder",node=""} 0.0', 'nexora_requests_total{model="coder",status="completed"} 1.0',
                    'nexora_tokens_total{direction="output",model="coder"}', 'nexora_alerts_open{severity="critical"}'):
         assert needle in body, needle
     assert "scrape-secret" not in body and "sk-nx-" not in body

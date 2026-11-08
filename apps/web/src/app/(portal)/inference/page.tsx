@@ -33,9 +33,9 @@ export default function Inference() {
           <EmptyState icon={<IconServer />} title="No enabled models" hint="Register a model first." />
         ) : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Model</th><th>Status</th><th>Queued</th><th>Running</th><th>Limits</th><th>Last check</th></tr></thead>
+            <thead><tr><th>Deployment</th><th>Status</th><th>Queued</th><th>Running</th><th>Limits</th><th>Last check</th></tr></thead>
             <tbody>{rows.map((r) => (
-              <tr key={r.deployment_id}><td><b>{r.model}</b></td><td><Badge value={r.status} /></td>
+              <tr key={r.deployment_id}><td><b>{r.model}</b><div className="muted">{r.deployment}{r.node ? ` · ${r.node}` : ""}</div></td><td><Badge value={r.status} /></td>
                 <td>{r.queued}</td><td>{r.active}</td>
                 <td className="muted">{r.max_active} running · {r.max_queue} queued</td>
                 <td className="muted">{r.last_check

@@ -135,6 +135,9 @@ class Api:
     def patch(self, url, json=None):
         return self.c.patch(f"/api/v1{url}", json=json, headers=self._h())
 
+    def put(self, url, json=None):
+        return self.c.put(f"/api/v1{url}", json=json, headers=self._h())
+
     def delete(self, url, **kw):
         return self.c.delete(f"/api/v1{url}", headers=self._h(), **kw)
 
@@ -170,6 +173,7 @@ class FakeLiteLLM:
         self.tokens: dict[str, str] = {}  # hashed token -> key
         self.down = False
         self.unhealthy = False  # LiteLLM /health reports the backend as down
+        self.fail_models: dict[str, tuple[int, str]] = {}  # model name -> (status, message) for inference calls
         self.gate = None  # asyncio.Event: inference calls wait on it until set
         self.inflight = 0
         self.max_inflight = 0
@@ -203,7 +207,13 @@ class FakeLiteLLM:
                 self.aliases = {a: k for a, k in self.aliases.items() if k != key}
             return httpx.Response(200, json={})
         if req.url.path == "/key/update":
+            key = self.tokens.get(body.get("key"), body.get("key"))
+            if key in self.keys and "models" in body:
+                self.keys[key] = body["models"]
             return httpx.Response(200, json={})
+        if req.url.path.endswith("/completions") and body.get("model") in self.fail_models:
+            status, msg = self.fail_models[body["model"]]
+            return httpx.Response(status, json={"error": {"message": msg, "type": "internal_server_error"}})
         if req.url.path.endswith("/completions"):
             # Like real LiteLLM: the key's model list is checked against the model in the request.
             caller = (req.headers.get("authorization") or "").removeprefix("Bearer ")
@@ -239,6 +249,8 @@ class DualTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
         if not request.url.path.endswith("/completions"):
             return f.handler(request)
         body = json.loads(request.content)
+        if body.get("model") in f.fail_models:  # fails fast, like a refused connection
+            return f.handler(request)
         msgs = body.get("messages") or [{}]
         f.order.append(msgs[0].get("content"))
         f.inflight += 1
@@ -258,3 +270,39 @@ def llm(app_, sched):
     app_.dependency_overrides[get_litellm] = lambda: client
     yield fake
     app_.dependency_overrides.pop(get_litellm, None)
+
+
+# ---- fake Ollama nodes (for the node sampler) -----------------------------------------------
+class FakeOllama:
+    """Serves /api/version, /api/tags and /api/ps per host, like the real read-only endpoints."""
+
+    def __init__(self):
+        self.nodes: dict[str, dict] = {}
+
+    def add(self, host, *, version="0.40.5", tags=None, resident=(), down=False):
+        self.nodes[host] = {"version": version, "tags": tags or {}, "resident": list(resident), "down": down}
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        n = self.nodes.get(req.url.host)
+        if n is None or n["down"]:
+            raise httpx.ConnectError("connection refused")
+        if req.url.path == "/api/version":
+            return httpx.Response(200, json={"version": n["version"]})
+        if req.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [
+                {"name": k, "digest": v + "0" * (64 - len(v)), "size": 1} for k, v in n["tags"].items()]})
+        if req.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [
+                {"name": r, "size": 15_000_000_000, "context_length": 65536, "expires_at": "2026-11-09T00:00:00Z"}
+                for r in n["resident"]]})
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def ollama():
+    from app import sampler
+
+    fake = FakeOllama()
+    sampler.transport_override = httpx.MockTransport(fake.handler)
+    yield fake
+    sampler.transport_override = None

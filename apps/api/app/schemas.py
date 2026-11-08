@@ -217,8 +217,3 @@ class QuotaOut(QuotaLimits):
     scope_type: str
     scope_id: str
     model_config = ConfigDict(from_attributes=True)
-
-
-class DeploymentUpdate(BaseModel):
-    max_active_requests: int | None = Field(default=None, ge=1, le=256)
-    max_queue_length: int | None = Field(default=None, ge=1, le=100000)

@@ -64,7 +64,8 @@ async def inference_health(_: User = Depends(require_super_admin), sched: Schedu
         return {str(d.id): (d.configuration or {}).get("health") for d in db.scalars(select(ModelDeployment))}
 
     health = await dbcall(q)
-    return {"deployments": [{"deployment_id": d.id, "model": d.model, "status": d.health, "queued": d.depth,
+    return {"deployments": [{"deployment_id": d.id, "model": d.model, "deployment": d.deployment, "node": d.node,
+                             "status": d.health, "queued": d.depth,
                              "active": d.active, "max_active": d.max_active, "max_queue": d.max_queue,
                              "last_check": health.get(d.id)} for d in inp.deployments]}
 

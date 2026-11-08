@@ -5,13 +5,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app import inference
-from app.audit import audit
 from app.authz import admin_team_ids, is_super
 from app.deps import ApiError, current_user, require_super_admin
 from app.inference import dbcall, get_scheduler
 from app.models import InferenceRequest, Model, ModelDeployment, User
 from app.scheduler import Scheduler
-from app.schemas import DeploymentUpdate
 
 router = APIRouter(tags=["queue"])
 
@@ -123,23 +121,3 @@ async def admin_queue(_: User = Depends(require_super_admin), sched: Scheduler =
     recent = await dbcall(lambda db: db.scalar(select(func.count()).select_from(InferenceRequest)
                                                .where(InferenceRequest.status.in_(("queued", "running")))))
     return {"deployments": out, "in_flight_records": recent}
-
-
-@router.patch("/admin/deployments/{deployment_id}")
-async def update_deployment(deployment_id: uuid.UUID, body: DeploymentUpdate,
-                            actor: User = Depends(require_super_admin)):
-    changes = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
-
-    def q(db):
-        d = db.get(ModelDeployment, deployment_id)
-        if d is None:
-            return None
-        d.configuration = {**(d.configuration or {}), **changes}
-        audit(db, actor, "deployment.update", "deployment", d.id, **changes)
-        db.commit()
-        return d.configuration
-
-    cfg = await dbcall(q)
-    if cfg is None:
-        raise ApiError(404, "NOT_FOUND", "Deployment not found.")
-    return {"id": str(deployment_id), "configuration": cfg}

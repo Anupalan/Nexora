@@ -78,6 +78,11 @@ async def list_models(key: KeyInfo = Depends(gateway_key)):
         {"id": a, "object": "model", "created": c, "owned_by": "nexora"} for a, c in rows]}
 
 
+def _route_headers(adm: Admitted) -> dict:
+    """Tell the client what actually served the request (roadmap §19)."""
+    return {"x-nexora-deployment": adm.dep_name, "x-nexora-model": adm.model_alias}
+
+
 def _error_event(code: str, message: str) -> list[bytes]:
     err = {"error": {"message": message, "type": "api_error", "param": None, "code": code}}
     return [f"data: {json.dumps(err)}\n\n".encode(), b"data: [DONE]\n\n"]
@@ -113,7 +118,8 @@ async def _non_stream(sched: Scheduler, adm: Admitted, up: inference.Upstream, h
 async def _respond(sched, litellm, adm, body, key, headers) -> Response:
     """Claimed: connect upstream and answer (stream or not)."""
     try:
-        up = await inference.start_upstream(sched, litellm, adm, body, key.secret)
+        up = await inference.dispatch(sched, litellm, adm, body, key.secret)
+        headers = {**headers, **_route_headers(adm)}  # a failover may have changed the deployment
     except inference.UpstreamCancelled:
         await inference.settle(sched, adm.id, adm.dep_id, status="cancelled", consumed=True,
                                in_tok=adm.est_input, out_tok=0, code="cancelled")
@@ -165,7 +171,7 @@ def _stream_after_wait(sched, litellm, adm, body, key, request: Request, headers
                 yield b
             return
         try:
-            up = await inference.start_upstream(sched, litellm, adm, body, key.secret)
+            up = await inference.dispatch(sched, litellm, adm, body, key.secret)
         except inference.UpstreamCancelled:
             await inference.settle(sched, adm.id, adm.dep_id, status="cancelled", consumed=True,
                                    in_tok=adm.est_input, out_tok=0, code="cancelled")
@@ -211,31 +217,35 @@ async def _proxy(request: Request, key: KeyInfo, sched: Scheduler, litellm: Lite
                                                    "not have access to it.")
     idem = (request.headers.get("idempotency-key") or "")[:200] or None
     adm = await inference.admit(sched, key_id=key.id, alias=alias, body=body, idem=idem)
-    headers = {"x-nexora-request-id": str(adm.id)}
-
-    if await sched.try_claim(adm.dep_id, adm.id, adm.max_active):
-        return await _respond(sched, litellm, adm, body, key, headers)
-    if adm.stream:
-        return _stream_after_wait(sched, litellm, adm, body, key, request, headers)
-
     try:
-        outcome = await inference.wait_for_turn(sched, adm, disconnected=request.is_disconnected)
-    except asyncio.CancelledError:  # server-side cancellation of the handler
-        with anyio.CancelScope(shield=True):
+        headers = {"x-nexora-request-id": str(adm.id), **_route_headers(adm)}
+
+        if await inference.try_claim(sched, adm):
+            return await _respond(sched, litellm, adm, body, key, headers)
+        if adm.stream:
+            return _stream_after_wait(sched, litellm, adm, body, key, request, headers)
+
+        try:
+            outcome = await inference.wait_for_turn(sched, adm, disconnected=request.is_disconnected)
+        except asyncio.CancelledError:  # server-side cancellation of the handler
+            with anyio.CancelScope(shield=True):
+                await inference.drop_waiter(sched, adm, "cancelled", "client_disconnected",
+                                            "Client disconnected while queued.")
+            raise
+        if outcome == "claimed":
+            return await _respond(sched, litellm, adm, body, key, headers)
+        if outcome == "timeout":
+            await inference.drop_waiter(sched, adm, "failed", "queue_timeout", "Timed out in queue.")
+            raise GatewayError(504, "queue_timeout", "Timed out waiting in the queue.", "api_error",
+                               headers=headers)
+        if outcome == "disconnected":
             await inference.drop_waiter(sched, adm, "cancelled", "client_disconnected",
                                         "Client disconnected while queued.")
+            return Response(status_code=499)
+        raise GatewayError(409, "request_cancelled", "The request was cancelled.", headers=headers)
+    except asyncio.CancelledError:
+        await inference.abandon(sched, adm)
         raise
-    if outcome == "claimed":
-        return await _respond(sched, litellm, adm, body, key, headers)
-    if outcome == "timeout":
-        await inference.drop_waiter(sched, adm, "failed", "queue_timeout", "Timed out in queue.")
-        raise GatewayError(504, "queue_timeout", "Timed out waiting in the queue.", "api_error",
-                           headers=headers)
-    if outcome == "disconnected":
-        await inference.drop_waiter(sched, adm, "cancelled", "client_disconnected",
-                                    "Client disconnected while queued.")
-        return Response(status_code=499)
-    raise GatewayError(409, "request_cancelled", "The request was cancelled.", headers=headers)
 
 
 @router.post("/chat/completions")

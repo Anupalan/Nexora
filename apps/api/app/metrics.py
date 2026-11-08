@@ -23,14 +23,15 @@ class NexoraCollector:
         self.inp, self.db = inp, db_stats
 
     def collect(self):
-        q = GaugeMetricFamily("nexora_queue_depth", "Requests waiting per model", labels=["model"])
-        a = GaugeMetricFamily("nexora_active_requests", "Requests running per model", labels=["model"])
-        h = GaugeMetricFamily("nexora_model_healthy", "1 if the model's last health check passed",
-                              labels=["model"])
+        lbl = ["model", "deployment", "node"]
+        q = GaugeMetricFamily("nexora_queue_depth", "Requests waiting per deployment", labels=lbl)
+        a = GaugeMetricFamily("nexora_active_requests", "Requests running per deployment", labels=lbl)
+        h = GaugeMetricFamily("nexora_model_healthy", "1 if the deployment's last health check passed",
+                              labels=lbl)
         for d in self.inp.deployments:
-            q.add_metric([d.model], d.depth)
-            a.add_metric([d.model], d.active)
-            h.add_metric([d.model], 1 if d.health == "healthy" else 0)
+            q.add_metric([d.model, d.deployment, d.node], d.depth)
+            a.add_metric([d.model, d.deployment, d.node], d.active)
+            h.add_metric([d.model, d.deployment, d.node], 1 if d.health == "healthy" else 0)
         yield from (q, a, h)
 
         w = GaugeMetricFamily("nexora_queue_wait_seconds_avg_5m", "Average queue wait over 5 minutes")

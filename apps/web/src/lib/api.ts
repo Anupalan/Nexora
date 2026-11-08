@@ -91,7 +91,7 @@ export interface Dashboard {
     avg_generation_tokens_per_s: number | null };
   totals: { users: number; open_alerts: number; critical_alerts: number };
   queue: { depth: number; active: number; avg_wait_ms_5m: number | null };
-  models: { model: string; health: string; queued: number; active: number; max_active: number }[];
+  models: { model: string; deployment: string; node: string; health: string; queued: number; active: number; max_active: number }[];
   gpu: null;
 }
 export interface AlertRow {
@@ -99,6 +99,30 @@ export interface AlertRow {
   created_at: string; resolved_at: string | null; auto_resolved: boolean;
 }
 export interface InferenceRow {
-  deployment_id: string; model: string; status: string; queued: number; active: number;
+  deployment_id: string; model: string; deployment: string; node: string; status: string; queued: number; active: number;
   max_active: number; max_queue: number; last_check: { checked_at: string; latency_ms: number; detail: string } | null;
+}
+
+export interface NodeRow {
+  id: string; name: string; runtime_url: string | null; enabled: boolean; max_concurrent: number | null;
+  deployments: number; sampled_at: string | null; reachable: boolean | null; version: string | null;
+  error: string | null; resident: { model: string; size: number | null; context_length: number | null }[];
+  installed: Record<string, string>;
+}
+export interface DeploymentRow {
+  id: string; model_id: string; model: string; name: string; node: string | null; node_id: string | null;
+  litellm_model: string; runtime_model: string | null; weight: number; enabled: boolean; draining: boolean;
+  health: string; resident: boolean | null; digest: string | null; context_limit: number | null;
+  max_active: number; max_queue: number; queued: number; active: number; strategy: string; frozen: boolean;
+}
+export interface PolicyRow {
+  id: string; model_id: string | null; version: number; strategy: string; status: string;
+  configuration: { residency_aware?: boolean; exclude_mismatched?: boolean; reference_digest?: string | null };
+}
+export interface DecisionRow {
+  request_id: string; attempt: number; strategy: string; policy_version: number | null;
+  chosen_deployment_id: string | null; reason: string; failover_from_deployment_id: string | null; created_at: string;
+  candidates: { deployment: string; node: string | null; eligible: boolean; excluded_because: string | null;
+    queued: number; active: number; max_active: number; resident: boolean | null; expected_wait_s: number;
+    cold_load_s: number; score: number }[];
 }

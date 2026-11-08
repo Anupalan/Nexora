@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import ApiError, current_user
 from app.litellm import LiteLLMClient, get_litellm
-from app.models import ApiKey, Model, User, utcnow
+from app.models import ApiKey, Model, ModelDeployment, User, utcnow
 from app.schemas import KeyCreate, KeyCreated, KeyOut, KeyUpdate
 from app.security import hash_token, new_token
 
@@ -35,11 +35,15 @@ def _validate_models(db: DBSession, requested: list[str] | None) -> list[str]:
 
 
 def _litellm_names(db: DBSession, aliases: list[str]) -> list[str]:
-    """LiteLLM checks a key's model list against the model name in each request, which Nexora
-    rewrites from alias to the LiteLLM model name. Keys must therefore be created with those names."""
-    rows = dict(db.execute(select(Model.model_alias, Model.litellm_model)
-                           .where(Model.model_alias.in_(aliases))).all())
-    return sorted({rows[a] for a in aliases if a in rows})
+    """LiteLLM checks a key's model list against the model name in each request, which Nexora rewrites
+    from alias to the chosen deployment's LiteLLM name. Keys must therefore carry the name of every
+    deployment an alias can route to (not the Nexora alias itself)."""
+    names: set[str] = set()
+    for m in db.scalars(select(Model).where(Model.model_alias.in_(aliases))):
+        names.add(m.litellm_model)
+        names.update(n for (n,) in db.execute(select(ModelDeployment.litellm_model).where(
+            ModelDeployment.model_id == m.id, ModelDeployment.litellm_model.is_not(None))))
+    return sorted(names)
 
 
 def _visible_key(db: DBSession, actor: User, key_id: uuid.UUID) -> ApiKey:

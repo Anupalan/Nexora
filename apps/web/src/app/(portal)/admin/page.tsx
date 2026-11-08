@@ -39,9 +39,10 @@ export default function AdminOverview() {
         <div className="card-head">Models <Link href="/inference">Inference servers →</Link></div>
         {d.models.length === 0 ? <EmptyState icon={<IconActivity />} title="No models registered" /> : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Model</th><th>Health</th><th>Queued</th><th>Running</th><th>Slots</th></tr></thead>
+            <thead><tr><th>Model</th><th>Deployment</th><th>Health</th><th>Queued</th><th>Running</th><th>Slots</th></tr></thead>
             <tbody>{d.models.map((m) => (
-              <tr key={m.model}><td><b>{m.model}</b></td><td><Badge value={m.health} /></td>
+              <tr key={`${m.model}:${m.deployment}`}><td><b>{m.model}</b></td>
+                <td className="muted">{m.deployment}{m.node ? ` · ${m.node}` : ""}</td><td><Badge value={m.health} /></td>
                 <td>{m.queued}</td><td>{m.active}</td><td>{m.max_active}</td></tr>
             ))}</tbody>
           </table></div>

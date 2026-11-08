@@ -175,6 +175,74 @@ class ModelDeployment(Base):
     health_status: Mapped[str] = mapped_column(String(20), default="unknown")
     configuration: Mapped[dict] = mapped_column(JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # ---- routing (roadmap §6.1). All optional so a plain single-deployment model keeps working.
+    node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inference_nodes.id", ondelete="RESTRICT"), nullable=True, index=True)
+    litellm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # overrides the model's
+    runtime_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # e.g. Ollama tag
+    weight: Mapped[int] = mapped_column(Integer, default=100)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    draining: Mapped[bool] = mapped_column(Boolean, default=False)
+    context_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class InferenceNode(Base):
+    """One machine running an inference server (Ollama on a DGX Spark). Holds sampled state."""
+
+    __tablename__ = "inference_nodes"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    runtime_url: Mapped[str | None] = mapped_column(String(300), nullable=True)  # sampled; no credentials
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)  # across all its models
+    state: Mapped[dict] = mapped_column(JSONType, default=dict)  # reachable, version, resident, tags
+    sampled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PlatformSetting(Base):
+    """Small durable key/value settings (e.g. the routing freeze switch)."""
+
+    __tablename__ = "platform_settings"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONType, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+
+
+class RoutingPolicy(Base):
+    """Versioned per-model routing policy; a new version retires the previous one."""
+
+    __tablename__ = "routing_policies"
+    __table_args__ = (UniqueConstraint("model_id", "version", name="uq_policy_model_version"),)
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    model_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("models.id", ondelete="RESTRICT"), nullable=True, index=True)  # null = default
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    strategy: Mapped[str] = mapped_column(String(30), default="least_loaded")
+    configuration: Mapped[dict] = mapped_column(JSONType, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | retired
+    created_by: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RoutingDecision(Base):
+    """Why a request ran where it did (one row per routing attempt: initial, failover, re-route)."""
+
+    __tablename__ = "routing_decisions"
+    __table_args__ = (Index("ix_decision_request", "request_id", "attempt"),)
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("inference_requests.id", ondelete="RESTRICT"))
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    policy_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    policy_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy: Mapped[str] = mapped_column(String(30))
+    chosen_deployment_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    candidates: Mapped[list] = mapped_column(JSONType, default=list)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    failover_from_deployment_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ApiKey(Base):

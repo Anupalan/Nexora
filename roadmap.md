@@ -45,7 +45,7 @@ added without redesigning the portal.
 | 3 | Quotas, usage and FIFO scheduler | Implemented; tested against real Redis (concurrency, recovery, cancellation) |
 | 4 | Admin analytics and operations | Implemented: dashboard, health checks, alerts, metrics, audit search, backups. Prometheus/Grafana files are syntax-checked only |
 | 5 | Activity logging depth | **Planned** |
-| 6 | Routing optimization | **Planned** |
+| 6 | Routing optimization | **Core implemented** (routing, health-aware and warm-model-aware selection, failover, queue re-routing, freeze, decision records, admin UI), verified on the real nodes. Latency-aware scoring, workload lanes, canary, rollups, recommendations and the simulator are still planned |
 | 7 | Production hardening and launch | **Planned** |
 
 The end-to-end workflow of §51 (admin creates team, developer, project and quotas; developer gets a
@@ -1976,7 +1976,24 @@ Exit criteria:
 
 ## 39. Phase 6 --- Routing Optimization
 
-**Indicative duration:** 2--3 weeks. **Status: planned.** Requires at least two registered
+**Indicative duration:** 2--3 weeks. **Status: core implemented (8 November 2026); the rest is planned.**
+
+Implemented and tested (including against real Redis, a fake LiteLLM/Ollama, and the real DGX nodes):
+nodes and multi-deployment registry with weights, drain, enable, context limit and a per-node concurrency
+budget; the router (fixed, least-loaded with residency awareness, weighted; deterministic, ties spread by
+request hash); the Ollama node sampler (version, installed models and digests, loaded models) as the health
+source for node-backed deployments; model-build equivalence (digest mismatch alert, optional reference build
+that excludes stale deployments); decision records and the explain API; response headers naming the
+deployment and model; failover to another deployment only when the failure looks like a connection error
+and a probe confirms the node is down (otherwise never replayed); re-routing of queued requests off
+unhealthy, draining or disabled deployments, in order; versioned policies; the freeze switch; the admin
+Routing page.
+
+Still planned: latency-aware scoring from rollups, workload classes and lanes with reserved capacity,
+warm-up and keep-alive management, canary percentages, rollups, recommendations, the replay simulator and
+the benchmark harness, tool-call and long-context validation on the real nodes.
+
+Original task list: Requires at least two registered
 deployments to demonstrate (they may share hardware initially, or use a second node when available).
 
 Tasks:

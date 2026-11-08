@@ -52,6 +52,10 @@ async def until(cond, timeout=10.0):
     raise AssertionError("condition not met in time")
 
 
+async def depth_is(sched, n):
+    return await sched.depth(dep_id()) == n
+
+
 def rows(**where):
     with Session(dbm.get_engine()) as db:
         q = select(InferenceRequest).order_by(InferenceRequest.created_at)
@@ -87,7 +91,7 @@ async def test_fifo_order_single_slot(gw, monkeypatch):  # noqa: F811
                 tasks.append(asyncio.create_task(post(c, k, f"m{i}")))
                 await until(lambda i=i: len(rows()) == i + 1)  # deterministic submission order
             await until(lambda: len(llm.order) == 1)
-            assert await gw["sched"].depth(dep_id()) == 4
+            await until(lambda: depth_is(gw["sched"], 4))  # wait for the queue itself, not just the rows
         finally:
             llm.gate.set()
         res = await asyncio.gather(*tasks)
@@ -105,8 +109,8 @@ async def test_concurrent_producers_stay_ordered_and_bounded(gw, monkeypatch):  
     claims: list[str] = []
     real_claim = gw["sched"].try_claim
 
-    async def recording_claim(dep, rid, max_active):
-        ok = await real_claim(dep, rid, max_active)
+    async def recording_claim(dep, rid, max_active, *rest):
+        ok = await real_claim(dep, rid, max_active, *rest)
         if ok:
             claims.append(str(rid))
         return ok
@@ -291,6 +295,7 @@ async def test_streaming_request_that_waits_gets_keepalive_then_stream(gw, monke
         await until(lambda: len(llm.order) == 1)
         second = asyncio.create_task(post(c, k, "m1", stream=True))
         await until(lambda: len(rows()) == 2)
+        await until(lambda: depth_is(gw["sched"], 1))  # it is really waiting before the slot frees up
         llm.gate.set()
         await first
         r = await second

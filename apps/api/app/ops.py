@@ -18,6 +18,7 @@ from app.litellm import LiteLLMClient
 from app.models import (
     Alert,
     AuditLog,
+    InferenceNode,
     InferenceRequest,
     Model,
     ModelDeployment,
@@ -32,8 +33,14 @@ from app.scheduler import Scheduler
 
 
 def _deployments(db: DBSession) -> list[tuple]:
-    return [(d.id, m.model_alias, m.litellm_model, m.enabled) for d, m in db.execute(
-        select(ModelDeployment, Model).join(Model, Model.id == ModelDeployment.model_id))]
+    out = []
+    for d, m, n in db.execute(select(ModelDeployment, Model, InferenceNode)
+                              .join(Model, Model.id == ModelDeployment.model_id)
+                              .outerjoin(InferenceNode, InferenceNode.id == ModelDeployment.node_id)):
+        sampled = bool(n and n.runtime_url and d.runtime_model)  # health comes from the node sampler
+        out.append((d.id, m.model_alias, d.litellm_model or m.litellm_model, d.enabled and m.enabled,
+                    sampled, d.deployment_name, d.health_status, (d.configuration or {}).get("health")))
+    return out
 
 
 def _store_health(db: DBSession, dep_id, healthy: bool, detail: str, latency_ms: int) -> None:
@@ -45,17 +52,26 @@ def _store_health(db: DBSession, dep_id, healthy: bool, detail: str, latency_ms:
 
 
 async def check_deployments(litellm: LiteLLMClient) -> list[dict]:
-    """Probe every enabled deployment through LiteLLM and persist the result."""
+    """Refresh node state (read-only Ollama endpoints), then probe the remaining deployments via LiteLLM."""
+    from app import sampler
+
     st = get_settings()
+    await sampler.sample_all()
     out = []
-    for dep_id, alias, litellm_model, enabled in await dbcall(_deployments):
+    for dep_id, alias, litellm_model, enabled, sampled, dep_name, health, last in await dbcall(_deployments):
         if not enabled:
+            continue
+        if sampled:  # never send a completion probe to a node: it would load models just to check health
+            out.append({"deployment_id": str(dep_id), "model": alias, "deployment": dep_name,
+                        "healthy": health == "healthy", "detail": (last or {}).get("detail", ""),
+                        "latency_ms": None, "source": "node sampler"})
             continue
         t0 = anyio.current_time()
         res = await anyio.to_thread.run_sync(litellm.health, litellm_model, st.health_timeout_seconds)
         ms = int((anyio.current_time() - t0) * 1000)
         await dbcall(_store_health, dep_id, res["healthy"], res["detail"], ms)
-        out.append({"deployment_id": str(dep_id), "model": alias, **res, "latency_ms": ms})
+        out.append({"deployment_id": str(dep_id), "model": alias, "deployment": dep_name, **res,
+                    "latency_ms": ms, "source": "litellm"})
     return out
 
 
@@ -70,6 +86,8 @@ class DeploymentState:
     active: int
     max_queue: int
     max_active: int
+    deployment: str = "default"
+    node: str = ""
 
 
 @dataclass
@@ -87,6 +105,8 @@ class OpsInputs:
     started_5m: int = 0
     auth_failures_10m: int = 0
     quotas: list[QuotaUse] = field(default_factory=list)
+    digest_mismatches: list[tuple[str, list[str]]] = field(default_factory=list)  # (model, digests)
+    version_skew: list[str] = field(default_factory=list)  # distinct Ollama versions when they differ
 
 
 Desired = dict[str, tuple[str, str, str, dict]]  # dedupe_key -> (type, severity, message, details)
@@ -99,7 +119,8 @@ def evaluate_rules(inp: OpsInputs) -> Desired:
         if d.health == "unhealthy":
             want[f"inference_unavailable:{d.id}"] = (
                 "inference_unavailable", "critical",
-                f"Model '{d.model}' is unhealthy or its inference server is unreachable.", {"model": d.model})
+                f"Model '{d.model}' deployment '{d.deployment}' is unhealthy or its inference server is "
+                "unreachable.", {"model": d.model, "deployment": d.deployment})
         if d.depth >= min(st.alert_queue_depth, max(1, int(d.max_queue * 0.8))):
             want[f"queue_depth:{d.id}"] = (
                 "queue_depth_high", "warning",
@@ -114,6 +135,16 @@ def evaluate_rules(inp: OpsInputs) -> Desired:
         want["auth_failures"] = ("repeated_auth_failures", "warning",
                                  f"{inp.auth_failures_10m} failed sign-ins in the last 10 minutes.",
                                  {"count": inp.auth_failures_10m})
+    for model, digests in inp.digest_mismatches:
+        want[f"digest_mismatch:{model}"] = (
+            "deployment_digest_mismatch", "warning",
+            f"Model '{model}' runs different builds on different nodes ({', '.join(digests)}); "
+            "answers may differ by node.", {"model": model, "digests": digests})
+    if len(inp.version_skew) > 1:
+        versions = ", ".join(inp.version_skew)
+        want["version_skew"] = ("node_version_skew", "info",
+                                f"Inference nodes run different Ollama versions ({versions}).",
+                                {"versions": inp.version_skew})
     for q in inp.quotas:
         ratio = q.used / q.limit
         key = f"quota:{q.scope}:{q.field}"
@@ -147,15 +178,26 @@ def reconcile_alerts(db: DBSession, want: Desired) -> dict:
     return {"opened": opened, "resolved": resolved, "open": len(want)}
 
 
-def _db_inputs(db: DBSession) -> tuple[list[tuple], int | None, int, int, list[Quota]]:
+def _db_inputs(db: DBSession):
     now = utcnow()
     deps = []
-    for d, m in db.execute(select(ModelDeployment, Model).join(Model, Model.id == ModelDeployment.model_id)
-                           .where(Model.enabled.is_(True))):
+    digests: dict[str, set[str]] = {}
+    for d, m, n in db.execute(select(ModelDeployment, Model, InferenceNode)
+                              .join(Model, Model.id == ModelDeployment.model_id)
+                              .outerjoin(InferenceNode, InferenceNode.id == ModelDeployment.node_id)
+                              .where(Model.enabled.is_(True))):
         cfg = d.configuration or {}
         deps.append((d.id, m.model_alias, d.health_status,
                      int(cfg.get("max_queue_length") or get_settings().default_max_queue_length),
-                     int(cfg.get("max_active_requests") or get_settings().default_max_active_requests)))
+                     int(cfg.get("max_active_requests") or get_settings().default_max_active_requests),
+                     d.deployment_name, n.name if n else ""))
+        if n is not None and d.enabled and d.runtime_model and (n.state or {}).get("reachable"):
+            dg = (n.state.get("tags") or {}).get(d.runtime_model)
+            if dg:
+                digests.setdefault(m.model_alias, set()).add(dg)
+    mismatches = [(alias, sorted(v)) for alias, v in digests.items() if len(v) > 1]
+    versions = sorted({(n.state or {}).get("version") for n in db.scalars(
+        select(InferenceNode).where(InferenceNode.enabled.is_(True))) if (n.state or {}).get("reachable")})
     five = now - timedelta(minutes=5)
     waits = [w for (w,) in db.execute(select(InferenceRequest.queue_time_ms).where(
         InferenceRequest.started_at >= five, InferenceRequest.queue_time_ms.is_not(None)))]
@@ -164,15 +206,18 @@ def _db_inputs(db: DBSession) -> tuple[list[tuple], int | None, int, int, list[Q
     quotas = list(db.scalars(select(Quota)))
     for q in quotas:
         db.expunge(q)
-    return deps, (int(sum(waits) / len(waits)) if waits else None), len(waits), fails, quotas
+    return (deps, (int(sum(waits) / len(waits)) if waits else None), len(waits), fails, quotas,
+            mismatches, [v for v in versions if v])
 
 
 async def gather_inputs(sched: Scheduler) -> OpsInputs:
-    deps, avg_wait, n_started, fails, quotas = await dbcall(_db_inputs)
-    inp = OpsInputs(avg_queue_wait_ms_5m=avg_wait, started_5m=n_started, auth_failures_10m=fails)
-    for dep_id, alias, health, max_q, max_a in deps:
+    deps, avg_wait, n_started, fails, quotas, mismatches, versions = await dbcall(_db_inputs)
+    inp = OpsInputs(avg_queue_wait_ms_5m=avg_wait, started_5m=n_started, auth_failures_10m=fails,
+                    digest_mismatches=mismatches, version_skew=versions)
+    for dep_id, alias, health, max_q, max_a, dep_name, node in deps:
         inp.deployments.append(DeploymentState(str(dep_id), alias, health, await sched.depth(dep_id),
-                                               await sched.active_count(dep_id), max_q, max_a))
+                                               await sched.active_count(dep_id), max_q, max_a,
+                                               dep_name, node))
     now = utcnow()
     for q in quotas:
         scope = (q.scope_type, q.scope_id)
@@ -193,9 +238,12 @@ async def run_alert_cycle(sched: Scheduler) -> dict:
 
 
 async def ops_cycle(sched: Scheduler, litellm: LiteLLMClient) -> dict:
+    from app.inference import rebalance_queued
+
     health = await check_deployments(litellm)
+    rebalance = await rebalance_queued(sched)  # evacuate queues of unhealthy/draining deployments
     alerts = await run_alert_cycle(sched)
-    return {"health": health, "alerts": alerts}
+    return {"health": health, "rebalance": rebalance, "alerts": alerts}
 
 
 # ---------------------------------------------------------------- dashboard
@@ -244,8 +292,9 @@ async def dashboard(sched: Scheduler) -> dict:
         "queue": {"depth": sum(d.depth for d in inp.deployments),
                   "active": sum(d.active for d in inp.deployments),
                   "avg_wait_ms_5m": inp.avg_queue_wait_ms_5m},
-        "models": [{"model": d.model, "health": d.health, "queued": d.depth, "active": d.active,
-                    "max_active": d.max_active} for d in inp.deployments],
+        "models": [{"model": d.model, "deployment": d.deployment, "node": d.node, "health": d.health,
+                    "queued": d.depth, "active": d.active, "max_active": d.max_active}
+                   for d in inp.deployments],
         # GPU / unified-memory figures come from the DGX Spark's exporter via Prometheus, not Nexora.
         "gpu": None,
     }

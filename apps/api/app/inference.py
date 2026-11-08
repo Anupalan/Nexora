@@ -22,13 +22,14 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import quota
+from app import quota, router
 from app.config import get_settings
 from app.db import session_scope
 from app.gwerrors import GatewayError
 from app.litellm import LiteLLMClient
 from app.models import (
     ApiKey,
+    InferenceNode,
     InferenceRequest,
     Model,
     ModelDeployment,
@@ -105,39 +106,52 @@ def ensure_default_deployment(db, model_id: uuid.UUID) -> ModelDeployment:
 
 
 def load_context(db, key_id: uuid.UUID, alias: str) -> dict | None:
-    st = get_settings()
     key = db.get(ApiKey, key_id)
     model = db.scalar(select(Model).where(Model.model_alias == alias, Model.enabled.is_(True)))
     if key is None or model is None:
         return None
-    dep = ensure_default_deployment(db, model.id)
-    cfg = dep.configuration or {}
+    ensure_default_deployment(db, model.id)  # every model has at least one deployment
     return {
         "user_id": key.user_id, "team_id": key.team_id, "project_id": key.project_id,
         "key_id": key.id, "model_id": model.id, "model_max_out": model.max_output_tokens,
-        "litellm_model": model.litellm_model, "dep_id": dep.id,
-        "max_active": int(cfg.get("max_active_requests") or st.default_max_active_requests),
-        "max_queue": int(cfg.get("max_queue_length") or st.default_max_queue_length),
+        "loaded": router.load_candidates(db, model.id),
         "limits": quota.resolve_limits(db, key),
     }
 
 
-def create_request(db, ctx: dict, *, reservation: dict, stream: bool, idem: str | None,
-                   source: str) -> uuid.UUID | None:
+def create_request(db, ctx: dict, *, rid: uuid.UUID, decision: router.Decision, reservation: dict,
+                   stream: bool, idem: str | None, source: str) -> uuid.UUID | None:
+    cand = decision.chosen
     r = InferenceRequest(
-        user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
-        api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=ctx["dep_id"],
+        id=rid, user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
+        api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cand.id),
         source=source, status="queued", stream=stream, idempotency_key=idem,
         reserved_tokens=reservation["tokens"], reservation=reservation)
     db.add(r)
     try:
         db.flush()
-        db.add(RequestEvent(request_id=r.id, event_type="queued", event_data={}))
+        db.add(RequestEvent(request_id=r.id, event_type="queued", event_data={"deployment": cand.name}))
+        router.record_decision(db, r.id, 1, ctx["loaded"].policy, decision)
         db.commit()
     except IntegrityError:
         db.rollback()
         return None
     return r.id
+
+
+def reject_unrouted(db, ctx: dict, rid: uuid.UUID, decision: router.Decision, *, stream: bool, source: str) -> None:
+    """Log a request that no deployment could take. It never had a reservation or a queue slot."""
+    cands = ctx["loaded"].candidates
+    r = InferenceRequest(
+        id=rid, user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
+        api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cands[0].id),
+        source=source, status="rejected", stream=stream, error_code=decision.error_code,
+        error_message=decision.error_message, completed_at=utcnow(), reserved_tokens=0, reservation={})
+    db.add(r)
+    db.flush()
+    db.add(RequestEvent(request_id=r.id, event_type="rejected", event_data={"code": decision.error_code}))
+    router.record_decision(db, r.id, 1, ctx["loaded"].policy, decision)
+    db.commit()
 
 
 def existing_by_idem(db, user_id, idem: str) -> str | None:
@@ -208,6 +222,12 @@ class Admitted:
     reserved: int
     stream: bool
     sequence: int
+    model_id: uuid.UUID | None = None
+    dep_name: str = ""
+    model_alias: str = ""
+    node_id: str | None = None
+    node_max: int = 0
+    attempt: int = 1
 
 
 def _estimate_input(body: dict) -> int:
@@ -241,6 +261,23 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
     est_in = _estimate_input(body)
     est = est_in + est_out
 
+    # Choose the deployment before reserving quota, so a request nothing can serve costs no quota.
+    loaded = ctx["loaded"]
+    rid = uuid.uuid4()
+    try:
+        await router.fill_load(sched, loaded)
+    except RedisError:
+        raise GatewayError(503, "scheduler_unavailable", "Request scheduler is unavailable.", "api_error")
+    decision = router.choose(loaded.candidates, loaded.policy, est_tokens=est, request_id=str(rid))
+    if decision.chosen is None:
+        await dbcall(reject_unrouted, ctx, rid, decision, stream=bool(body.get("stream")), source=source)
+        status = {"context_length_exceeded": 400, "queue_full": 429}.get(decision.error_code, 503)
+        raise GatewayError(status, decision.error_code, decision.error_message,
+                           "invalid_request_error" if status == 400 else
+                           "rate_limit_error" if status == 429 else "api_error",
+                           headers={"Retry-After": "5"} if status in (429, 503) else None)
+    pick = decision.chosen
+
     now = utcnow()
     plan = quota.build_plan(ctx["limits"], now, est)
     try:
@@ -249,23 +286,33 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
             raise GatewayError(429, rej.code, rej.message, "rate_limit_error",
                                headers={"Retry-After": str(rej.retry_after)})
         reservation = plan.reservation(est)
-        rid = await dbcall(create_request, ctx, reservation=reservation,
-                           stream=bool(body.get("stream")), idem=idem, source=source)
-        if rid is None:  # lost an idempotency race
+        created = await dbcall(create_request, ctx, rid=rid, decision=decision, reservation=reservation,
+                               stream=bool(body.get("stream")), idem=idem, source=source)
+        if created is None:  # lost an idempotency race
             await quota.release_capacity(sched.redis, reservation, requests=True, tokens=est)
             raise GatewayError(409, "duplicate_request",
                                "A request with this Idempotency-Key already exists.")
-        seq = await sched.enqueue(ctx["dep_id"], rid, ctx["max_queue"])
-        if seq < 0:
-            await dbcall(reject_request, rid, "queue_full", "The request queue is full.")
-            await quota.release_capacity(sched.redis, reservation, requests=True, tokens=est)
-            raise GatewayError(429, "queue_full", "The request queue is full. Retry shortly.",
-                               "rate_limit_error", headers={"Retry-After": "5"})
+        try:
+            seq = await sched.enqueue(pick.id, rid, pick.max_queue)
+            if seq < 0:
+                await dbcall(reject_request, rid, "queue_full", "The request queue is full.")
+                await quota.release_capacity(sched.redis, reservation, requests=True, tokens=est)
+                raise GatewayError(429, "queue_full", "The request queue is full. Retry shortly.",
+                                   "rate_limit_error", headers={"Retry-After": "5"})
+            await dbcall(set_sequence, rid, seq)
+        except asyncio.CancelledError:
+            # The client vanished after the record and reservation exist: undo both, even though the
+            # task is being cancelled (the shield lets this cleanup finish).
+            with anyio.CancelScope(shield=True):
+                await sched.remove_queued(pick.id, rid)
+                await settle(sched, rid, uuid.UUID(pick.id), status="cancelled", consumed=False,
+                             code="client_disconnected", msg="Client disconnected during admission.")
+            raise
     except RedisError:
         raise GatewayError(503, "scheduler_unavailable", "Request scheduler is unavailable.", "api_error")
-    await dbcall(set_sequence, rid, seq)
-    return Admitted(rid, ctx["dep_id"], ctx["max_active"], ctx["litellm_model"], est_in, est,
-                    bool(body.get("stream")), seq)
+    return Admitted(rid, pick.id, pick.max_active, pick.litellm_model, est_in, est,
+                    bool(body.get("stream")), seq, model_id=ctx["model_id"], dep_name=pick.name,
+                    model_alias=pick.model_alias, node_id=pick.node_id, node_max=pick.node_budget or 0)
 
 
 # ---- settlement --------------------------------------------------------------------------
@@ -294,6 +341,15 @@ async def settle(sched: Scheduler, adm_id: uuid.UUID, dep_id: uuid.UUID, *, stat
 
 # ---- waiting and execution ---------------------------------------------------------------
 
+async def try_claim(sched: Scheduler, adm: Admitted) -> bool:
+    return await sched.try_claim(adm.dep_id, adm.id, adm.max_active, adm.node_id, adm.node_max)
+
+
+def _apply_move(adm: Admitted, info: dict) -> None:
+    adm.dep_id, adm.max_active, adm.litellm_model = info["dep_id"], info["max_active"], info["litellm_model"]
+    adm.dep_name, adm.node_id, adm.node_max = info["dep_name"], info.get("node_id"), info.get("node_max", 0)
+
+
 async def wait_for_turn(sched: Scheduler, adm: Admitted, *, disconnected: Callable | None = None,
                         on_wait: Callable | None = None) -> str:
     """Returns claimed | cancelled | timeout | disconnected. Never holds a slot while waiting."""
@@ -301,10 +357,14 @@ async def wait_for_turn(sched: Scheduler, adm: Admitted, *, disconnected: Callab
     deadline = time.monotonic() + st.queue_timeout_seconds
     delay, last_touch, last_note = 0.02, 0.0, 0.0
     while True:
-        if await sched.try_claim(adm.dep_id, adm.id, adm.max_active):
+        if await try_claim(sched, adm):
             return "claimed"
         pos = await sched.position(adm.dep_id, adm.id)
         if pos is None:
+            moved = await sched.get_moved(adm.id)  # re-routed to another deployment while waiting?
+            if moved and moved["dep_id"] != adm.dep_id:
+                _apply_move(adm, moved)
+                continue
             return "cancelled"
         now = time.monotonic()
         if now > deadline:
@@ -319,6 +379,17 @@ async def wait_for_turn(sched: Scheduler, adm: Admitted, *, disconnected: Callab
             await on_wait(pos)
         await asyncio.sleep(delay)
         delay = min(delay * 1.5, 0.25)
+
+
+async def abandon(sched: Scheduler, adm: Admitted) -> None:
+    """The handler was cancelled after admission: release whatever the request still holds."""
+    with anyio.CancelScope(shield=True):
+        if await sched.remove_queued(adm.dep_id, adm.id):  # still waiting: nothing was consumed
+            await settle(sched, adm.id, uuid.UUID(adm.dep_id), status="cancelled", consumed=False,
+                         code="client_disconnected", msg="Client disconnected.")
+        else:  # it had been claimed: settle as consumed (a no-op if it already finished)
+            await settle(sched, adm.id, uuid.UUID(adm.dep_id), status="cancelled", consumed=True,
+                         in_tok=adm.est_input, out_tok=0, code="client_disconnected", msg="Client disconnected.")
 
 
 async def drop_waiter(sched: Scheduler, adm: Admitted, status: str, code: str, msg: str) -> None:
@@ -464,6 +535,159 @@ async def stream_through(sched: Scheduler, adm: Admitted, up: Upstream,
             await settle(sched, adm.id, adm.dep_id, status=status, consumed=True, in_tok=in_tok,
                          out_tok=out_tok, ttft_ms=ttft, code=code, msg=msg)
             await up.close()
+
+
+# ---- failover and queued re-routing (roadmap §6) -----------------------------------------
+
+def looks_like_backend_connection_failure(status: int, raw: bytes) -> bool:
+    """LiteLLM answers 500 'OpenAIException - Connection error.' when a node cannot be reached.
+
+    The text alone is NOT proof the request never ran (a connection reset mid-request reads the same),
+    so callers must also confirm the node is really unreachable before failing over.
+    """
+    if status not in (500, 502, 503, 504):
+        return False
+    text = raw[:2000].decode(errors="replace").lower()
+    return any(m in text for m in ("connection error", "cannot connect", "connection refused",
+                                   "all connection attempts failed", "name or service not known"))
+
+
+def _node_url_for(db, dep_id: str):
+    d = db.get(ModelDeployment, uuid.UUID(dep_id))
+    n = db.get(InferenceNode, d.node_id) if d and d.node_id else None
+    return (n.id, n.runtime_url) if n and n.runtime_url else (None, None)
+
+
+async def node_confirmed_down(dep_id: str) -> bool:
+    """Probe the deployment's node right now (read-only). Only a confirmed outage permits failover."""
+    from app import sampler
+
+    node_id, url = await dbcall(_node_url_for, dep_id)
+    if not url:
+        return False  # cannot confirm -> do not replay
+    state = await sampler.sample_node(node_id, url)  # also refreshes health for every deployment on it
+    return not state.get("reachable")
+
+
+def _reroute_db(db, rid: uuid.UUID, new_dep: str, seq: int, policy, decision, *, from_dep: str, attempt: int,
+                event: str, requeue: bool) -> None:
+    r = db.get(InferenceRequest, rid)
+    if r is None or r.status not in ("queued", "running"):
+        return
+    r.deployment_id, r.queue_sequence = uuid.UUID(new_dep), seq
+    if requeue:  # it was running on the failed deployment and never produced output
+        r.status, r.started_at, r.queue_time_ms = "queued", None, None
+    router.record_decision(db, rid, attempt, policy, decision, failover_from=from_dep)
+    db.add(RequestEvent(request_id=rid, event_type=event,
+                        event_data={"from": from_dep, "to": new_dep, "reason": decision.reason[:300]}))
+    db.commit()
+
+
+def _mark_unhealthy(db, dep_id: str, detail: str) -> None:
+    d = db.get(ModelDeployment, uuid.UUID(dep_id))
+    d.health_status = "unhealthy"
+    d.configuration = {**(d.configuration or {}), "health": {
+        "checked_at": utcnow().isoformat(), "detail": detail, "source": "dispatch failure"}}
+    db.commit()
+
+
+async def failover(sched: Scheduler, adm: Admitted) -> bool:
+    """Move a request that could not be dispatched to another deployment. False if there is none."""
+    old = adm.dep_id
+    await dbcall(_mark_unhealthy, old, "node unreachable during dispatch")
+    loaded = await dbcall(router.load_candidates, adm.model_id)
+    await router.fill_load(sched, loaded)
+    decision = router.choose(loaded.candidates, loaded.policy, est_tokens=adm.reserved,
+                             request_id=str(adm.id), exclude={old})
+    if decision.chosen is None:
+        return False
+    new = decision.chosen
+    await sched.release_active(old, adm.id)
+    seq = await sched.enqueue(new.id, adm.id, new.max_queue)
+    if seq < 0:
+        return False
+    adm.attempt += 1
+    _apply_move(adm, {"dep_id": new.id, "max_active": new.max_active, "litellm_model": new.litellm_model,
+                      "dep_name": new.name, "node_id": new.node_id, "node_max": new.node_budget or 0})
+    adm.sequence = seq
+    await dbcall(_reroute_db, adm.id, new.id, seq, loaded.policy, decision, from_dep=old,
+                 attempt=adm.attempt, event="failover", requeue=True)
+    return True
+
+
+async def dispatch(sched: Scheduler, litellm: LiteLLMClient, adm: Admitted, body: dict,
+                   caller_key: str) -> Upstream:
+    """Connect upstream; if a node proves unreachable, fail over once to another deployment."""
+    up = await start_upstream(sched, litellm, adm, body, caller_key)
+    if up.resp.status_code < 400:
+        return up
+    raw = await up.resp.aread()
+    if not (looks_like_backend_connection_failure(up.resp.status_code, raw)
+            and await node_confirmed_down(adm.dep_id) and await failover(sched, adm)):
+        return up  # callers handle the error response (it is not replayed)
+    await up.close()
+    outcome = await wait_for_turn(sched, adm)
+    if outcome != "claimed":
+        if outcome == "timeout":
+            await drop_waiter(sched, adm, "failed", "queue_timeout", "Timed out in queue after failover.")
+        raise httpx.ConnectError("deployment unavailable after failover")
+    return await start_upstream(sched, litellm, adm, body, caller_key)
+
+
+def _model_of(db, dep_id):
+    d = db.get(ModelDeployment, uuid.UUID(dep_id))
+    return d.model_id
+
+
+def _reserved(db, rid):
+    r = db.get(InferenceRequest, uuid.UUID(rid))
+    return r.reserved_tokens if r else 0
+
+
+def _needs_evacuation(db) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    rows = db.execute(select(ModelDeployment, InferenceNode).outerjoin(
+        InferenceNode, InferenceNode.id == ModelDeployment.node_id))
+    out = []
+    for d, n in rows:
+        node_off = n is not None and not n.enabled
+        if not d.enabled or d.draining or d.health_status == "unhealthy" or node_off:
+            out.append((d.id, d.model_id))
+    return out
+
+
+async def rebalance_queued(sched: Scheduler) -> dict:
+    """Move still-queued requests off deployments that are unhealthy, draining or disabled.
+
+    Only queued requests move (running ones finish or fail where they are). Moves happen in queue
+    order, so their relative order is preserved; waiters notice the move and keep waiting.
+    """
+    moved = stuck = 0
+    for dep_id, model_id in await dbcall(_needs_evacuation):
+        ids = await sched.queued_ids(str(dep_id))
+        if not ids:
+            continue
+        loaded = await dbcall(router.load_candidates, model_id)
+        await router.fill_load(sched, loaded)
+        for rid in ids:
+            est = await dbcall(_reserved, rid)
+            decision = router.choose(loaded.candidates, loaded.policy, est_tokens=est, request_id=rid,
+                                     exclude={str(dep_id)})
+            if decision.chosen is None:
+                stuck += len(ids) - ids.index(rid)
+                break
+            new = decision.chosen
+            seq = await sched.move_queued(str(dep_id), new.id, rid, new.max_queue)
+            if seq < 0:
+                stuck += 1
+                continue
+            await sched.set_moved(rid, {"dep_id": new.id, "max_active": new.max_active,
+                                        "litellm_model": new.litellm_model, "dep_name": new.name,
+                                        "node_id": new.node_id, "node_max": new.node_budget or 0})
+            await dbcall(_reroute_db, uuid.UUID(rid), new.id, seq, loaded.policy, decision,
+                         from_dep=str(dep_id), attempt=2, event="rerouted", requeue=False)
+            new.queued += 1  # later moves in this pass see the added load, so they spread out
+            moved += 1
+    return {"moved": moved, "stuck": stuck}
 
 
 async def sweep_once(sched: Scheduler) -> dict:

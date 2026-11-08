@@ -89,3 +89,21 @@ Back up secrets separately, encrypted, with restricted recovery access.
 - Daily: Alerts page empty or understood; backup metric fresh.
 - Weekly: run `restore-test.sh` on the latest backup; review Audit Logs for privileged changes.
 - Per release: `alembic upgrade head` on a copy first; `tests/e2e/demo.py` against staging.
+
+## Routing and nodes (Phase 6 core)
+- **Add a node:** `POST /admin/nodes` (`name`, `runtime_url` = the Ollama base URL, optional `max_concurrent`),
+  then `POST /admin/deployments` per model on it (`runtime_model` = the Ollama tag, `litellm_model` = the name
+  LiteLLM serves it under, `max_active_requests` at or below the node's `OLLAMA_NUM_PARALLEL`). New
+  deployment names are pushed onto existing API keys automatically; check `keys_failed` in the response.
+  Ollama has no authentication: keep it reachable only from the gateway host.
+- **Take a node out of service gracefully:** *Drain* its deployments on the Routing page. New requests avoid it,
+  queued ones move to other deployments, running ones finish. Disable it when idle.
+- **Something looks wrong:** *Freeze routing* forces the fixed strategy everywhere at once; *Resume* undoes it.
+  Both are audited. To see why a request went where it did: `GET /routing/explain/{request_id}`.
+- **Digest mismatch alert:** the same model tag is different builds on different nodes. Pull the same build on
+  both (`ollama pull`), re-sample, then optionally set a reference build in the model's policy so a stale node
+  is excluded automatically.
+- **Cold models:** a request to a node without the model loaded pays a load (seconds to minutes). The router
+  avoids that while a warm node has capacity; set `load_seconds` on the deployment to your measured value.
+- **Failover is conservative on purpose:** it needs a connection-style error *and* a probe showing the node
+  down. Any other failure is returned to the client rather than replayed.

@@ -7,7 +7,7 @@ import { api, type AlertRow } from "@/lib/api";
 import { SessionGate, useUser } from "@/lib/session";
 import {
   IconActivity, IconBell, IconChart, IconCpu, IconDashboard, IconFolder, IconGauge, IconKey, IconLogo, IconLogout,
-  IconQueue, IconServer, IconShield, IconTeam, IconUsers,
+  IconQueue, IconRoute, IconServer, IconShield, IconTeam, IconUsers,
 } from "@/components/icons";
 
 type Item = [href: string, label: string, Icon: ComponentType<{ size?: number }>];
@@ -43,6 +43,7 @@ function Shell({ children }: { children: ReactNode }) {
     ...(admin ? ([["Administration", [
       ["/admin", "Admin Overview", IconActivity],
       ["/inference", "Inference Servers", IconServer],
+      ["/routing", "Routing", IconRoute],
       ["/alerts", "Alerts", IconBell],
       ["/quotas", "Quota Policies", IconGauge],
       ["/audit", "Audit Logs", IconShield],

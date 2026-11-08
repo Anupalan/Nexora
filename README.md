@@ -4,7 +4,7 @@
 how they are used, and routing that keeps them fast — Model Gateway · Activity Intelligence ·
 Routing Optimization.
 
-Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phases 0–4 implemented** (gateway, keys, quotas, FIFO queue, usage, admin operations). Next: activity-logging depth (Phase 5) and routing optimization (Phase 6). See `docs/operations.md` for runbooks.
+Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phases 0–4 implemented** (gateway, keys, quotas, FIFO queue, usage, admin operations) and the **routing core** of Phase 6. Next: activity-logging depth (Phase 5) and the rest of routing optimization (latency-aware scoring, workload lanes, recommendations). See `docs/operations.md` for runbooks.
 
 ## Layout
 - `apps/api` — FastAPI management API (auth, RBAC, users, teams, projects, audit), Alembic migrations
@@ -29,6 +29,31 @@ cd apps/web && pnpm install && pnpm dev
 ```
 Tests: `cd apps/api && .venv/bin/pytest` (SQLite database; needs `redis-server` on PATH, or set
 `TEST_REDIS_URL`, because the Lua-based reservation/queue logic is tested against a real Redis).
+
+## Routing (Phase 6 core)
+A model can have several **deployments** (one model on one **node**, for example Ollama on a DGX Spark). Each
+request is routed at admission to the deployment expected to serve it soonest:
+
+- eligible only if enabled, not draining, healthy, with a big enough context window and room in its queue;
+- score = expected queue wait + cold-load cost when the model is not resident on that node (so a warm node
+  beats an idle cold one, until the warm one is busy enough that a load is cheaper); ties are spread by a
+  hash of the request id, so equal nodes share load deterministically;
+- a node can carry a total concurrency budget across all its models;
+- every decision (candidates, scores, reason) is stored and shown at `GET /routing/explain/{request_id}`;
+  responses carry `x-nexora-deployment` and `x-nexora-model`;
+- **failover** happens only when the failure looks like a connection error *and* an immediate probe confirms
+  the node is down; otherwise the request fails and is never replayed. Queued requests move off unhealthy,
+  draining or disabled deployments in order;
+- node health, loaded models, model digests and versions come from read-only Ollama endpoints
+  (`/api/version`, `/api/tags`, `/api/ps`), never from completion probes, so a cold model is not loaded just
+  to check on it; different builds of one model on different nodes raise an alert, and a reference build can
+  exclude the stale one;
+- policies are versioned per model (fixed, least-loaded, weighted); the **freeze** switch forces fixed routing
+  everywhere instantly. Manage it all from the admin **Routing** page or `/admin/nodes`, `/admin/deployments`,
+  `/admin/routing/*`. Two-node Ollama setup: `infra/litellm/config.ollama.yaml`.
+
+Verified on two real DGX nodes (see roadmap §1.2). Not built yet: latency-aware scoring, workload lanes with
+reserved capacity, warm-up/keep-alive management, canary rollout, recommendations and the simulator.
 
 ## Phase 4 status (admin analytics and operations)
 Done: admin overview (active developers, requests, tokens, queue, failures, time to first token,
