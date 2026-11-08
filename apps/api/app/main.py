@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -7,11 +10,56 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.config import get_settings
-from app.db import get_engine
-from app.routers import admin, auth, gateway, keys, models, projects, teams, users
+from app.db import get_engine, session_scope
+from app.inference import dbcall, get_scheduler, sweep_once
+from app.routers import (
+    admin,
+    auth,
+    gateway,
+    keys,
+    models,
+    projects,
+    queue,
+    quotas,
+    teams,
+    usage,
+    users,
+)
 
 settings = get_settings()
-app = FastAPI(title=f"{settings.app_name} API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Startup: rebuild Redis counters if Redis was wiped; run the crash-recovery sweeper."""
+    sched = get_scheduler()
+    stop = asyncio.Event()
+
+    async def sweeper():
+        first = True
+        while not stop.is_set():
+            try:
+                if first:
+                    from app import quota
+                    await dbcall(lambda db: None)  # warm the engine
+                    with session_scope() as db:
+                        await quota.ensure_counters(sched.redis, db)
+                    first = False
+                await sweep_once(sched)
+            except Exception:  # noqa: BLE001 - recovery must never take the API down
+                logging.getLogger("nexora").exception("sweeper iteration failed")
+            try:
+                await asyncio.wait_for(stop.wait(), settings.sweeper_interval_seconds)
+            except TimeoutError:
+                pass
+
+    task = asyncio.create_task(sweeper())
+    yield
+    stop.set()
+    task.cancel()
+
+
+app = FastAPI(title=f"{settings.app_name} API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +92,8 @@ def _envelope(request: Request, status: int, code: str, message: str, details=No
 async def http_error(request: Request, exc: HTTPException):
     d = exc.detail
     if isinstance(d, dict) and "openai" in d:  # OpenAI-shaped errors on /v1
-        return JSONResponse(status_code=exc.status_code, content={"error": d["openai"]})
+        return JSONResponse(status_code=exc.status_code, content={"error": d["openai"]},
+                            headers=exc.headers)
     if isinstance(d, dict) and "code" in d:
         return _envelope(request, exc.status_code, d["code"], d["message"], d.get("details"))
     return _envelope(request, exc.status_code, f"HTTP_{exc.status_code}", str(d))
@@ -58,7 +107,7 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 
 for r in (auth.router, users.router, teams.router, projects.router, admin.router,
-          keys.router, models.router):
+          keys.router, models.router, quotas.router, queue.router, usage.router):
     app.include_router(r, prefix="/api/v1")
 app.include_router(gateway.router)
 
@@ -69,10 +118,11 @@ def live():
 
 
 @app.get("/health/ready", tags=["health"])
-def ready():
+async def ready():
     try:
         with get_engine().connect() as c:
             c.execute(text("SELECT 1"))
+        await get_scheduler().redis.ping()
     except Exception:
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     return {"status": "ok"}

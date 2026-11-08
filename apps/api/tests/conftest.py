@@ -1,27 +1,86 @@
+import json
+import os
+import shutil
+import subprocess
+import time
+
+import httpx
 import pytest
+import redis as sync_redis
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import app.db as dbm
+from app import inference
 from app.cli import seed_roles
 from app.config import get_settings
+from app.inference import LoopRedis
+from app.litellm import LiteLLMClient, get_litellm
 from app.models import Role, User
+from app.scheduler import Scheduler
 from app.security import hash_password
 
 PW = "correct-horse-battery"
+MASTER = "sk-master-secret"
+REDIS_PORT = 6391
+
+
+@pytest.fixture(scope="session")
+def redis_url():
+    """A real Redis (Lua scripts are part of the behaviour under test). CI sets TEST_REDIS_URL."""
+    url = os.environ.get("TEST_REDIS_URL")
+    proc = None
+    if not url:
+        exe = shutil.which("redis-server")
+        if not exe:
+            pytest.skip("redis-server not available and TEST_REDIS_URL not set")
+        proc = subprocess.Popen([exe, "--port", str(REDIS_PORT), "--save", "", "--appendonly", "no"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        url = f"redis://127.0.0.1:{REDIS_PORT}/0"
+    c = sync_redis.Redis.from_url(url)
+    for _ in range(50):
+        try:
+            c.ping()
+            break
+        except sync_redis.ConnectionError:
+            time.sleep(0.1)
+    else:
+        pytest.skip("could not reach redis")
+    yield url
+    if proc:
+        proc.terminate()
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch):
+def _env(monkeypatch, tmp_path, redis_url):
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("REDIS_URL", redis_url)
+    monkeypatch.setenv("SWEEPER_INTERVAL_SECONDS", "3600")
     get_settings.cache_clear()
-    dbm.configure_engine("sqlite://")
+    sync_redis.Redis.from_url(redis_url).flushall()
+    dbm.configure_engine(f"sqlite:///{tmp_path}/test.db")
     dbm.Base.metadata.create_all(dbm.get_engine())
     with Session(dbm.get_engine()) as db:
         seed_roles(db)
-    yield
+    st = get_settings()
+    sched = Scheduler(LoopRedis(redis_url), lease_seconds=st.lease_seconds,
+                      waiter_ttl_seconds=st.waiter_ttl_seconds)
+    inference.set_scheduler(sched)
+    yield sched
+    inference.set_scheduler(None)
+    for c in _CLIENTS:
+        c.__exit__(None, None, None)
+    _CLIENTS.clear()
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def sched(_env) -> Scheduler:
+    return _env
+
+
+_CLIENTS: list = []
 
 
 @pytest.fixture
@@ -47,6 +106,8 @@ class Api:
 
     def __init__(self, app, email: str | None = None, password: str = PW):
         self.c = TestClient(app, base_url="http://testserver")
+        self.c.__enter__()  # one event loop per client (runs the app lifespan too)
+        _CLIENTS.append(self.c)
         if email:
             r = self.c.post("/api/v1/auth/login", json={"email": email, "password": password})
             assert r.status_code == 200, r.text
@@ -91,19 +152,14 @@ def world(app_):
 
 
 # ---- fake LiteLLM ---------------------------------------------------------------------
-import json  # noqa: E402
-
-import httpx  # noqa: E402
-
-from app.litellm import LiteLLMClient, get_litellm  # noqa: E402
-
-MASTER = "sk-master-secret"
-
-
 class FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
         self.down = False
+        self.gate = None  # asyncio.Event: inference calls wait on it until set
+        self.inflight = 0
+        self.max_inflight = 0
+        self.order: list = []  # labels (first message content) in the order calls reached upstream
         self.stream_chunks = [b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n',
                               b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
                               b"data: [DONE]\n\n"]
@@ -130,11 +186,38 @@ class FakeLiteLLM:
     def paths(self):
         return [c["path"] for c in self.calls]
 
+    def calls_to(self, path: str) -> list[dict]:
+        return [c for c in self.calls if c["path"] == path]
+
+
+class DualTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
+    def __init__(self, fake: FakeLiteLLM):
+        self.fake = fake
+
+    def handle_request(self, request):
+        return self.fake.handler(request)
+
+    async def handle_async_request(self, request):
+        f = self.fake
+        if not request.url.path.endswith("/completions"):
+            return f.handler(request)
+        body = json.loads(request.content)
+        msgs = body.get("messages") or [{}]
+        f.order.append(msgs[0].get("content"))
+        f.inflight += 1
+        f.max_inflight = max(f.max_inflight, f.inflight)
+        try:
+            if f.gate is not None:
+                await f.gate.wait()
+            return f.handler(request)
+        finally:
+            f.inflight -= 1
+
 
 @pytest.fixture
-def llm(app_):
+def llm(app_, sched):
     fake = FakeLiteLLM()
-    client = LiteLLMClient("http://litellm", MASTER, 30, transport=httpx.MockTransport(fake.handler))
+    client = LiteLLMClient("http://litellm", MASTER, 30, transport=DualTransport(fake))
     app_.dependency_overrides[get_litellm] = lambda: client
     yield fake
     app_.dependency_overrides.pop(get_litellm, None)

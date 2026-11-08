@@ -1,9 +1,20 @@
-"""Schema: identity, organisation, sessions, audit, models and API keys (roadmap §10)."""
+"""Schema: identity, organisation, sessions, audit, models, keys, quotas, inference (roadmap §10)."""
 
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -158,6 +169,7 @@ class Model(Base):
 
 class ModelDeployment(Base):
     __tablename__ = "model_deployments"
+    __table_args__ = (UniqueConstraint("model_id", "deployment_name", name="uq_model_deployment_name"),)
     id: Mapped[uuid.UUID] = _uuid_pk()
     model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id", ondelete="RESTRICT"), index=True)
     deployment_name: Mapped[str] = mapped_column(String(200))
@@ -193,3 +205,95 @@ class ApiKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User] = relationship(lazy="joined")
+
+
+QUOTA_SCOPES = ("global", "team", "user", "key", "project")
+GLOBAL_SCOPE_ID = "*"
+
+
+class Quota(Base):
+    """One row per scope. NULL limit = unlimited. Effective policy = every applicable scope must pass."""
+
+    __tablename__ = "quotas"
+    __table_args__ = (UniqueConstraint("scope_type", "scope_id"),)
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    scope_type: Mapped[str] = mapped_column(String(20))
+    scope_id: Mapped[str] = mapped_column(String(64))  # UUID string, or "*" for global
+    requests_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requests_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requests_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_per_minute: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tokens_per_day: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tokens_per_month: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)  # queued + running
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class InferenceRequest(Base):
+    """Durable record of one model request (roadmap §5.7). Postgres is the source of truth."""
+
+    __tablename__ = "inference_requests"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key"),
+        Index("ix_inf_user_created", "user_id", "created_at"),
+        Index("ix_inf_status_created", "status", "created_at"),
+        Index("ix_inf_team_created", "team_id", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="RESTRICT"), nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True)
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("api_keys.id", ondelete="RESTRICT"), nullable=True)
+    model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id", ondelete="RESTRICT"))
+    deployment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("model_deployments.id", ondelete="RESTRICT"))
+    source: Mapped[str] = mapped_column(String(20), default="api")  # api | workspace
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    stream: Mapped[bool] = mapped_column(Boolean, default=False)
+    queue_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reservation: Mapped[dict] = mapped_column(JSONType, default=dict)  # Redis counter keys held
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    queue_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RequestEvent(Base):
+    __tablename__ = "request_events"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("inference_requests.id", ondelete="RESTRICT"), index=True)
+    event_type: Mapped[str] = mapped_column(String(40))
+    event_data: Mapped[dict] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UsageRecord(Base):
+    """Append-only token ledger; one row per request that consumed model capacity."""
+
+    __tablename__ = "usage_records"
+    __table_args__ = (Index("ix_usage_user_recorded", "user_id", "recorded_at"),)
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("inference_requests.id", ondelete="RESTRICT"), unique=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)
+    model_id: Mapped[uuid.UUID] = mapped_column(SAUuid)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

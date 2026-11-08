@@ -61,3 +61,27 @@ export interface ApiKeyInfo {
   last_used_at: string | null; created_at: string;
 }
 export interface ApiKeyCreated extends ApiKeyInfo { key: string }
+
+export interface UsageBucket {
+  requests: number; failed: number; input_tokens: number; output_tokens: number; total_tokens: number;
+}
+export interface UsageReport {
+  from: string; to: string;
+  totals: UsageBucket & { avg_queue_ms: number | null; avg_ttft_ms: number | null };
+  by_day: (UsageBucket & { date: string })[];
+  by_model: (UsageBucket & { model: string })[];
+}
+export interface HistoryRow {
+  id: string; model: string; source: string; status: string; input_tokens: number | null;
+  output_tokens: number | null; queue_time_ms: number | null; duration_ms: number | null;
+  error_code: string | null; created_at: string;
+}
+export interface QueueItem {
+  id: string; status: string; created_at: string; error_code: string | null;
+}
+export interface QuotaRow {
+  id: string; scope_type: string; scope_id: string;
+  requests_per_minute: number | null; requests_per_day: number | null; requests_per_month: number | null;
+  tokens_per_minute: number | null; tokens_per_day: number | null; tokens_per_month: number | null;
+  max_concurrent: number | null; max_output_tokens: number | null;
+}

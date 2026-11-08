@@ -18,8 +18,10 @@ function Shell({ children }: { children: ReactNode }) {
     ["/teams", "Teams"],
     ["/keys", "API Keys"],
     ["/models", "Models"],
+    ["/usage", "Usage"],
+    ["/queue", "Request Queue"],
     ...(lead ? ([["/users", "Developers"]] as [string, string][]) : []),
-    ...(admin ? ([["/audit", "Audit Logs"]] as [string, string][]) : []),
+    ...(admin ? ([["/quotas", "Quota Policies"], ["/audit", "Audit Logs"]] as [string, string][]) : []),
   ];
   async function logout() {
     await api("/auth/logout", { method: "POST" }).catch(() => {});

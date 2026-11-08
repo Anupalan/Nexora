@@ -9,3 +9,5 @@ node_modules/
 *.tsbuildinfo
 next-env.d.ts
 *.egg-info/
+.claude/
+.dev-credentials.txt

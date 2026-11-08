@@ -49,6 +49,9 @@ def register_model(body: ModelCreate, actor: User = Depends(require_super_admin)
     except IntegrityError:
         db.rollback()
         raise ApiError(409, "ALIAS_EXISTS", "A model with this alias already exists.")
+    from app.models import ModelDeployment
+
+    db.add(ModelDeployment(model_id=m.id, deployment_name="default", endpoint_reference="litellm"))
     audit(db, actor, "model.create", "model", m.id, alias=m.model_alias)
     db.commit()
     return m

@@ -199,3 +199,32 @@ class KeyOut(ORM):
 
 class KeyCreated(KeyOut):
     key: str  # plaintext, shown exactly once
+
+
+# ---- quotas, queue, usage --------------------------------------------------------------
+class QuotaLimits(BaseModel):
+    requests_per_minute: int | None = Field(default=None, ge=1)
+    requests_per_day: int | None = Field(default=None, ge=1)
+    requests_per_month: int | None = Field(default=None, ge=1)
+    tokens_per_minute: int | None = Field(default=None, ge=1)
+    tokens_per_day: int | None = Field(default=None, ge=1)
+    tokens_per_month: int | None = Field(default=None, ge=1)
+    max_concurrent: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
+
+class QuotaCreate(QuotaLimits):
+    scope_type: Literal["global", "team", "user", "key", "project"]
+    scope_id: str | None = None  # required except for global
+
+
+class QuotaOut(QuotaLimits):
+    id: uuid.UUID
+    scope_type: str
+    scope_id: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DeploymentUpdate(BaseModel):
+    max_active_requests: int | None = Field(default=None, ge=1, le=256)
+    max_queue_length: int | None = Field(default=None, ge=1, le=100000)

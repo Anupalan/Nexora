@@ -8,7 +8,7 @@ from tests.conftest import MASTER, Api
 
 
 @pytest.fixture
-def gw(world, llm):
+def gw(world, llm, sched):
     """World + two registered models (one will be used for permission tests)."""
     root = world["root"]
     for alias, lm in (("coder", "openai/qwen-coder"), ("chat", "openai/qwen-chat")):
@@ -16,6 +16,7 @@ def gw(world, llm):
                                         "max_output_tokens": 100})
         assert r.status_code == 201, r.text
     world["llm"] = llm
+    world["sched"] = sched
     return world
 
 

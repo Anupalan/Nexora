@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     gateway_timeout_seconds: float = 600.0
     key_prefix: str = "sk-nx-"
 
+    # Scheduler / quotas (roadmap §5.5, §5.6, §21)
+    default_max_active_requests: int = 2  # per model deployment; raise after benchmarking
+    default_max_queue_length: int = 100
+    queue_timeout_seconds: int = 300
+    lease_seconds: int = 60
+    heartbeat_seconds: int = 15
+    waiter_ttl_seconds: int = 15
+    default_output_tokens_estimate: int = 1024
+    sweeper_interval_seconds: int = 10
+
     cors_origins: list[str] = ["http://localhost:3000"]
 
 
