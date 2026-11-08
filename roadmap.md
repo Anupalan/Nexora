@@ -709,6 +709,11 @@ count, error rate, queue wait p50/p95/p99, time to first token p50/p95, generati
 maximum queue depth, utilization (active/capacity). These feed routing scores, dashboards, alerts and
 recommendations, and keep reporting fast as the request log grows.
 
+**Implemented (8 November 2026):** the warm-up and keep-alive manager (opt-in per deployment, memory-budget guarded,
+back-off, `warmup_failed` alert) and latency-aware scoring (per-class service time). Extraction is a *critical* workload
+class that is served first at every free slot, bounded by a burst limit so it cannot starve other classes, and it is
+routed across both nodes by expected time to finish like any other class.
+
 ### 6.6 Recommendations and what-if simulation
 
 The system proposes changes and shows the evidence; an administrator applies or dismisses them.

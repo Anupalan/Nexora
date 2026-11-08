@@ -197,6 +197,7 @@ class InferenceNode(Base):
     runtime_url: Mapped[str | None] = mapped_column(String(300), nullable=True)  # sampled; no credentials
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)  # across all its models
+    memory_budget_gb: Mapped[int | None] = mapped_column(Integer, nullable=True)  # models Nexora may keep loaded
     state: Mapped[dict] = mapped_column(JSONType, default=dict)  # reachable, version, resident, tags
     sampled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

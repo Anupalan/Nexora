@@ -106,7 +106,7 @@ export interface InferenceRow {
 }
 
 export interface NodeRow {
-  id: string; name: string; runtime_url: string | null; enabled: boolean; max_concurrent: number | null;
+  id: string; name: string; runtime_url: string | null; enabled: boolean; max_concurrent: number | null; memory_budget_gb: number | null;
   deployments: number; sampled_at: string | null; reachable: boolean | null; version: string | null;
   error: string | null; resident: { model: string; size: number | null; context_length: number | null }[];
   installed: Record<string, string>;
@@ -116,10 +116,12 @@ export interface DeploymentRow {
   litellm_model: string; runtime_model: string | null; weight: number; enabled: boolean; draining: boolean;
   health: string; resident: boolean | null; digest: string | null; context_limit: number | null;
   max_active: number; max_queue: number; queued: number; active: number; strategy: string; frozen: boolean;
+  keep_warm?: boolean; warm?: { action?: string; ok?: boolean; detail?: string; reason?: string; at?: string; failures?: number };
   classes: Record<string, { reserved: number; active: number; queued: number }>;
 }
 export interface WorkloadConfig {
-  classes: Record<string, { reserved_pct: number; priority: number }>; borrow_idle_after_s: number;
+  classes: Record<string, { reserved_pct: number; priority: number; critical?: boolean }>; borrow_idle_after_s: number;
+  critical_burst: number;
 }
 export interface PolicyRow {
   id: string; model_id: string | null; version: number; strategy: string; status: string;

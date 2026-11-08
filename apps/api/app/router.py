@@ -58,6 +58,9 @@ class Candidate:
     max_active: int = 2
     max_queue: int = 100
     avg_service_s: float | None = None
+    keep_warm: bool = False
+    warm: dict = field(default_factory=dict)  # last warm-up action (see app.warmup)
+    svc_by_class: dict[str, float] = field(default_factory=dict)  # measured service seconds per workload class
     # live state (filled from Redis)
     queued: int = 0
     active: int = 0
@@ -65,6 +68,7 @@ class Candidate:
     # workload lanes (filled by load_candidates / fill_load); empty means classes are not in play
     reserved: dict[str, int] = field(default_factory=dict)  # class -> reserved slots on this deployment
     class_prio: dict[str, int] = field(default_factory=dict)  # class -> priority (lower goes first)
+    class_crit: dict[str, bool] = field(default_factory=dict)  # critical classes are served first
     hold: bool = False  # recently-active classes keep their reserved slots
     cls_active: dict[str, int] = field(default_factory=dict)
     cls_queued: dict[str, int] = field(default_factory=dict)
@@ -125,14 +129,29 @@ def ineligible(c: Candidate, p: Policy, est_tokens: int, exclude: set[str]) -> s
     return None
 
 
-def expected_wait(c: Candidate, p: Policy, klass: str = workload.DEFAULT_CLASS) -> float:
+def measured_service(c: Candidate, klass: str) -> float | None:
+    """Observed seconds per request on this deployment for `klass`, falling back to its all-class average."""
+    return c.svc_by_class.get(klass) or c.avg_service_s
+
+
+def service_estimates(cands: list[Candidate], p: Policy, klass: str) -> dict[str, float]:
+    """Seconds a `klass` request takes on each deployment. Unmeasured deployments borrow the median of the
+    measured ones (or the policy default when none is measured), so a node without history is neither
+    shunned nor favoured and gets traffic that lets it be measured."""
+    known = sorted(v for c in cands if (v := measured_service(c, klass)))
+    fallback = known[len(known) // 2] if known else p.default_service_s
+    return {c.id: measured_service(c, klass) or fallback for c in cands}
+
+
+def expected_wait(c: Candidate, p: Policy, klass: str = workload.DEFAULT_CLASS,
+                  svc: float | None = None) -> float:
     """Seconds a new request of `klass` would wait for a slot (queueing only, not generation).
 
     Slots held back for other recently-active classes are not available to this request, and classes that
     outrank it count as work ahead of it. With no other class in play this reduces to the plain
     (queued + running - slots + 1) / slots formula.
     """
-    svc = c.avg_service_s or p.default_service_s
+    svc = svc or measured_service(c, klass) or p.default_service_s
     if not c.cls_seen and not c.cls_queued and not c.cls_active:
         ahead = max(0, c.queued + c.active - c.max_active + 1)
         wait = ahead / max(1, c.max_active) * svc
@@ -145,8 +164,11 @@ def expected_wait(c: Candidate, p: Policy, klass: str = workload.DEFAULT_CLASS) 
         free_k = free_total if a_k < r_k else max(0, free_total - held_others)
         prio = c.class_prio.get(klass, 99)
         backlog = c.cls_queued.get(klass, 0)
+        if not c.class_crit.get(klass):  # critical classes jump ahead even of a class under its reservation
+            backlog += sum(n for o, n in c.cls_queued.items() if o != klass and c.class_crit.get(o))
         if a_k >= r_k:  # only borrowing: higher-priority classes that are waiting are served first
-            backlog += sum(n for o, n in c.cls_queued.items() if o != klass and c.class_prio.get(o, 99) < prio)
+            backlog += sum(n for o, n in c.cls_queued.items()
+                           if o != klass and c.class_prio.get(o, 99) < prio and not c.class_crit.get(o))
         cap = max(1, c.max_active - held_others)
         wait = max(0, backlog - free_k + 1) * svc / cap
     if c.node_budget and c.node_active >= c.node_budget:
@@ -165,16 +187,19 @@ def choose(cands: list[Candidate], policy: Policy, *, est_tokens: int, request_i
     pol = policy if not policy.frozen else Policy(**{**asdict(policy), "residency_aware": False})
     rows: list[dict] = []
     eligible: list[Candidate] = []
+    svc_est = service_estimates(cands, pol, klass)
     for c in sorted(cands, key=lambda x: (x.name, x.id)):
         why = ineligible(c, pol, est_tokens, exclude)
-        wait, cold = expected_wait(c, pol, klass), cold_cost(c, pol)
+        svc = svc_est[c.id]
+        wait, cold = expected_wait(c, pol, klass, svc), cold_cost(c, pol)
         rows.append({"deployment": c.name, "deployment_id": c.id, "node": c.node, "eligible": why is None,
                      "excluded_because": why, "queued": c.queued, "active": c.active,
                      "max_active": c.max_active, "weight": c.weight, "health": c.health,
                      "resident": c.resident, "expected_wait_s": round(wait, 2),
-                     "cold_load_s": round(cold, 2), "class": klass, "class_reserved": c.reserved.get(klass, 0),
+                     "cold_load_s": round(cold, 2), "service_s": round(svc, 2),
+                     "service_measured": measured_service(c, klass) is not None, "class": klass, "class_reserved": c.reserved.get(klass, 0),
                      "class_active": c.cls_active.get(klass, 0), "class_queued": c.cls_queued.get(klass, 0),
-                     "score": round((wait + cold) * (100 / max(c.weight, 1)), 3)})
+                     "score": round((wait + cold) * (100 / max(c.weight, 1)) + svc, 3)})
         if why is None:
             eligible.append(c)
     prefix = "routing frozen: " if policy.frozen else ""
@@ -224,14 +249,15 @@ def choose(cands: list[Candidate], policy: Policy, *, est_tokens: int, request_i
         else:
             chosen = ranked[0]
         r = by_id[chosen.id]
-        reason = f"least_loaded: {chosen.name} has the lowest expected delay ({r['expected_wait_s']}s queue"
+        reason = (f"least_loaded: {chosen.name} has the lowest expected time to finish "
+                  f"({r['expected_wait_s']}s queue + {r['service_s']}s to run")
         if r["cold_load_s"]:
             reason += f" + {r['cold_load_s']}s cold model load"
         reason += ")"
         others = [c for c in ranked if c.id != chosen.id]
         if others:
             o = by_id[others[0].id]
-            reason += f" vs {others[0].name} {o['expected_wait_s']}s" + (
+            reason += f" vs {others[0].name} {o['expected_wait_s']}s + {o['service_s']}s" + (
                 f" + {o['cold_load_s']}s cold" if o["cold_load_s"] else "")
         if len(tied) > 1:
             reason += f"; tied with {len(tied) - 1} other deployment(s), picked by request hash to spread load"
@@ -276,10 +302,14 @@ def load_candidates(db, model_id) -> Loaded | None:
         resident = None
         if n is not None and d.runtime_model and state.get("reachable"):
             resident = d.runtime_model in (state.get("resident") or {})
-        recent = [ms for (ms,) in db.execute(
-            select(InferenceRequest.duration_ms).where(
+        history = list(db.execute(
+            select(InferenceRequest.duration_ms, InferenceRequest.workload_class).where(
                 InferenceRequest.deployment_id == d.id, InferenceRequest.status == "completed",
-                InferenceRequest.duration_ms.is_not(None)).order_by(InferenceRequest.completed_at.desc()).limit(50))]
+                InferenceRequest.duration_ms.is_not(None)).order_by(InferenceRequest.completed_at.desc()).limit(300)))
+        recent = [ms for ms, _ in history[:50]]
+        per_class: dict[str, list[float]] = {}
+        for ms, k in history:
+            per_class.setdefault(k or workload.DEFAULT_CLASS, []).append(ms)
         if n is not None:
             node_ids.add(str(n.id))
         cands.append(Candidate(
@@ -292,11 +322,14 @@ def load_candidates(db, model_id) -> Loaded | None:
             resident=resident, load_seconds=float(cfg.get("load_seconds") or DEFAULT_LOAD_S),
             max_active=int(cfg.get("max_active_requests") or st.default_max_active_requests),
             max_queue=int(cfg.get("max_queue_length") or st.default_max_queue_length),
-            avg_service_s=(sum(recent) / len(recent) / 1000) if len(recent) >= 5 else None))
+            keep_warm=bool(cfg.get("keep_warm")), warm=cfg.get("warm") or {},
+            avg_service_s=(sum(recent) / len(recent) / 1000) if len(recent) >= 5 else None,
+            svc_by_class={k: sum(v[:50]) / len(v[:50]) / 1000 for k, v in per_class.items() if len(v) >= 5}))
     wl = workload.load_config(db)
     for c in cands:
         c.reserved = workload.reserved_slots(c.max_active, wl)
         c.class_prio = {n: v["priority"] for n, v in wl.classes.items()}
+        c.class_crit = {n: bool(v.get("critical")) for n, v in wl.classes.items()}
         c.hold = wl.borrow_idle_after_s > 0
     node_deps: dict[str, list[str]] = {}
     if node_ids:

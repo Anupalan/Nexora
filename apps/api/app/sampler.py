@@ -29,6 +29,7 @@ def sample_url(url: str, timeout: float = 5.0) -> dict:
     return {
         "reachable": True, "version": version,
         "tags": {m["name"]: m.get("digest", "")[:12] for m in tags},
+        "sizes": {m["name"]: m.get("size") or 0 for m in tags},
         "resident": {m["name"]: {"size": m.get("size"), "context_length": m.get("context_length"),
                                  "expires_at": m.get("expires_at")} for m in ps},
     }

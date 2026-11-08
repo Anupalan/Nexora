@@ -108,6 +108,18 @@ Back up secrets separately, encrypted, with restricted recovery access.
 - **Failover is conservative on purpose:** it needs a connection-style error *and* a probe showing the node
   down. Any other failure is returned to the client rather than replayed.
 
+## Keeping models warm
+- A cold load costs seconds (about 5-6 s for the 8B model). Turn on *Keep warm* for a deployment (Routing page, or
+  `PATCH /admin/deployments/{id}` with `keep_warm: true` and optionally `keep_alive`, default `24h`). Each ops cycle then
+  loads the model if it is missing and refreshes Ollama's keep-alive before it runs low (any client can shorten the
+  timer with its own `keep_alive`, which is why a refresh is needed). *Warm now* does it immediately.
+- **It never pushes a production model out.** A model that is not loaded is only preloaded when the node has a
+  *Memory budget* (GB, set on the node) and the loaded models plus this one fit inside it. Without a budget Nexora
+  only refreshes models that are already loaded. Set the budget below the node's real memory, leaving headroom for
+  context caches.
+- A failed attempt is recorded on the deployment, retried no more often than every 5 minutes, and raises a
+  `warmup_failed` alert after 3 failures in a row. Warm-up uses an empty-prompt `/api/generate`: it generates nothing.
+
 ## Workload lanes
 - **Assign a class:** Projects page (project) or API Keys page (a single key); both super admin only. A key's class
   overrides its project's; unassigned traffic is `standard`. The extraction service should have its own key with class
@@ -119,6 +131,17 @@ Back up secrets separately, encrypted, with restricted recovery access.
   total is about N times one request, it is serial). Set each deployment's `max_active_requests` to that number. If it
   is larger than Ollama really runs, requests queue inside Ollama where lanes cannot reorder them. DGX 1 measured serial
   (parallelism 1) for the 8B model on 9 Nov 2026, and DGX 2 measured the same (8 Nov 2026, 8B model, 1/2/4 concurrent).
+- **Extraction is critical.** The `extraction` class is marked *critical*: at every free slot it is served before every
+  other class, even one under its reservation. To keep it from starving chat and coding it can go first at most
+  *critical burst* times in a row (default 4) while another class waits, then the waiting class gets one turn. Held slots
+  of recently-active classes are still respected; criticality changes the order, not the capacity guarantees. On
+  one-slot nodes a chat request therefore waits for at most the current request plus up to `burst` extraction requests
+  when extraction is backed up; lower the burst to favour chat, raise it to favour extraction.
+- **Extraction on both nodes.** Create one deployment of the extraction model per node (same model alias, different
+  `node_id`). The router sends each extraction request to whichever node will finish it soonest, and the extraction
+  key keeps the `extraction` class. The model must be installed on both nodes (an uninstalled model marks that
+  deployment unhealthy, so it is skipped) and, for consistent results, be the same build: set the policy's reference
+  build so a node with a different digest is excluded.
 - **What lanes cannot do:** they never interrupt a running request, so with one slot a chat request waits for the current
   request to finish (seconds for chat-sized work, longer for very long generations). Keep extraction requests
   reasonably sized, or raise `OLLAMA_NUM_PARALLEL` for true reserved capacity.

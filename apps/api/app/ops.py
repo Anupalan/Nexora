@@ -88,6 +88,8 @@ class DeploymentState:
     max_active: int
     deployment: str = "default"
     node: str = ""
+    warm_failures: int = 0  # consecutive failed warm-up attempts for a keep_warm deployment
+    warm_detail: str = ""
 
 
 @dataclass
@@ -121,6 +123,12 @@ def evaluate_rules(inp: OpsInputs) -> Desired:
                 "inference_unavailable", "critical",
                 f"Model '{d.model}' deployment '{d.deployment}' is unhealthy or its inference server is "
                 "unreachable.", {"model": d.model, "deployment": d.deployment})
+        if d.warm_failures >= 3:
+            want[f"warmup_failed:{d.id}"] = (
+                "warmup_failed", "warning",
+                f"Keeping '{d.model}' ({d.deployment}) loaded on {d.node} has failed {d.warm_failures} times in a "
+                f"row ({d.warm_detail}). Requests may hit a cold model.",
+                {"model": d.model, "deployment": d.deployment, "failures": d.warm_failures})
         if d.depth >= min(st.alert_queue_depth, max(1, int(d.max_queue * 0.8))):
             want[f"queue_depth:{d.id}"] = (
                 "queue_depth_high", "warning",
@@ -190,7 +198,9 @@ def _db_inputs(db: DBSession):
         deps.append((d.id, m.model_alias, d.health_status,
                      int(cfg.get("max_queue_length") or get_settings().default_max_queue_length),
                      int(cfg.get("max_active_requests") or get_settings().default_max_active_requests),
-                     d.deployment_name, n.name if n else ""))
+                     d.deployment_name, n.name if n else "",
+                     int((cfg.get("warm") or {}).get("failures", 0)) if cfg.get("keep_warm") else 0,
+                     str((cfg.get("warm") or {}).get("detail", ""))))
         if n is not None and d.enabled and d.runtime_model and (n.state or {}).get("reachable"):
             dg = (n.state.get("tags") or {}).get(d.runtime_model)
             if dg:
@@ -214,10 +224,10 @@ async def gather_inputs(sched: Scheduler) -> OpsInputs:
     deps, avg_wait, n_started, fails, quotas, mismatches, versions = await dbcall(_db_inputs)
     inp = OpsInputs(avg_queue_wait_ms_5m=avg_wait, started_5m=n_started, auth_failures_10m=fails,
                     digest_mismatches=mismatches, version_skew=versions)
-    for dep_id, alias, health, max_q, max_a, dep_name, node in deps:
+    for dep_id, alias, health, max_q, max_a, dep_name, node, wfail, wdetail in deps:
         inp.deployments.append(DeploymentState(str(dep_id), alias, health, await sched.depth(dep_id),
                                                await sched.active_count(dep_id), max_q, max_a,
-                                               dep_name, node))
+                                               dep_name, node, wfail, wdetail))
     now = utcnow()
     for q in quotas:
         scope = (q.scope_type, q.scope_id)
@@ -240,10 +250,13 @@ async def run_alert_cycle(sched: Scheduler) -> dict:
 async def ops_cycle(sched: Scheduler, litellm: LiteLLMClient) -> dict:
     from app.inference import rebalance_queued
 
+    from app import warmup
+
     health = await check_deployments(litellm)
+    warm = await warmup.warm_cycle()  # keep opted-in models resident (after health, before alerts)
     rebalance = await rebalance_queued(sched)  # evacuate queues of unhealthy/draining deployments
     alerts = await run_alert_cycle(sched)
-    return {"health": health, "rebalance": rebalance, "alerts": alerts}
+    return {"health": health, "warm": warm, "rebalance": rebalance, "alerts": alerts}
 
 
 # ---------------------------------------------------------------- dashboard

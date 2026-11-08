@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app import router as routing
-from app import sampler
+from app import sampler, warmup
 from app.audit import audit
 from app.authz import admin_team_ids, is_super
 from app.deps import ApiError, current_user, require_super_admin
@@ -42,12 +42,14 @@ class NodeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
     runtime_url: str | None = Field(default=None, max_length=300)
     max_concurrent: int | None = Field(default=None, ge=1, le=1024)
+    memory_budget_gb: int | None = Field(default=None, ge=1, le=4096)
 
 
 class NodeUpdate(BaseModel):
     runtime_url: str | None = Field(default=None, max_length=300)
     enabled: bool | None = None
     max_concurrent: int | None = Field(default=None, ge=1, le=1024)
+    memory_budget_gb: int | None = Field(default=None, ge=1, le=4096)
 
 
 class DeploymentCreate(BaseModel):
@@ -61,6 +63,8 @@ class DeploymentCreate(BaseModel):
     max_active_requests: int | None = Field(default=None, ge=1, le=256)
     max_queue_length: int | None = Field(default=None, ge=1, le=100000)
     load_seconds: float | None = Field(default=None, ge=0, le=3600)
+    keep_warm: bool | None = None
+    keep_alive: str | None = Field(default=None, pattern=r"^(-1|[1-9][0-9]{0,5}[smh])$")
 
 
 class DeploymentUpdate(BaseModel):
@@ -74,6 +78,8 @@ class DeploymentUpdate(BaseModel):
     max_active_requests: int | None = Field(default=None, ge=1, le=256)
     max_queue_length: int | None = Field(default=None, ge=1, le=100000)
     load_seconds: float | None = Field(default=None, ge=0, le=3600)
+    keep_warm: bool | None = None
+    keep_alive: str | None = Field(default=None, pattern=r"^(-1|[1-9][0-9]{0,5}[smh])$")
 
 
 class PolicyIn(BaseModel):
@@ -90,7 +96,8 @@ class PolicyIn(BaseModel):
 def _node_out(n: InferenceNode, deployments: int = 0) -> dict:
     st = n.state or {}
     return {"id": str(n.id), "name": n.name, "runtime_url": n.runtime_url, "enabled": n.enabled,
-            "max_concurrent": n.max_concurrent, "deployments": deployments, "sampled_at": n.sampled_at,
+            "max_concurrent": n.max_concurrent, "memory_budget_gb": n.memory_budget_gb,
+            "deployments": deployments, "sampled_at": n.sampled_at,
             "reachable": st.get("reachable"), "version": st.get("version"), "error": st.get("error"),
             "resident": [{"model": k, **v} for k, v in (st.get("resident") or {}).items()],
             "installed": st.get("tags") or {}}
@@ -114,7 +121,8 @@ async def create_node(body: NodeCreate, actor: User = Depends(require_super_admi
     def q(db):
         if db.scalar(select(InferenceNode).where(InferenceNode.name == body.name)):
             raise ApiError(409, "NODE_EXISTS", "A node with this name already exists.")
-        n = InferenceNode(name=body.name, runtime_url=url, max_concurrent=body.max_concurrent)
+        n = InferenceNode(name=body.name, runtime_url=url, max_concurrent=body.max_concurrent,
+                          memory_budget_gb=body.memory_budget_gb)
         db.add(n)
         db.flush()
         audit(db, actor, "node.create", "node", n.id, name=n.name)
@@ -139,6 +147,16 @@ async def update_node(node_id: uuid.UUID, body: NodeUpdate, actor: User = Depend
         db.commit()
         return _node_out(n)
     return await dbcall(q)
+
+
+@router.post("/admin/deployments/{deployment_id}/warm")
+async def warm_deployment(deployment_id: uuid.UUID, actor: User = Depends(require_super_admin)):
+    """Load or refresh this deployment's model now. Needs keep_warm on; a model that is not resident is only
+    loaded when its node has a memory budget the model fits in (so production models are never pushed out)."""
+    res = await warmup.warm_now(deployment_id)
+    await dbcall(lambda db: (audit(db, actor, "deployment.warm", "deployment", deployment_id,
+                                   result=res["action"], ok=res["ok"]), db.commit()))
+    return res
 
 
 @router.post("/admin/nodes/{node_id}/sample")
@@ -167,6 +185,7 @@ async def _deployment_rows(sched: Scheduler, model_id: uuid.UUID | None = None) 
                         "draining": c.draining, "health": c.health, "resident": c.resident,
                         "digest": c.digest, "context_limit": c.context_limit, "max_active": c.max_active,
                         "max_queue": c.max_queue, "load_seconds": c.load_seconds, "queued": c.queued,
+                        "keep_warm": c.keep_warm, "warm": c.warm,
                         "active": c.active, "strategy": loaded.policy.strategy, "frozen": loaded.policy.frozen,
                         "classes": {n: {"reserved": c.reserved.get(n, 0), "active": c.cls_active.get(n, 0),
                                         "queued": c.cls_queued.get(n, 0)} for n in loaded.workload.classes}})
@@ -215,7 +234,8 @@ async def create_deployment(body: DeploymentCreate, actor: User = Depends(requir
             raise ApiError(409, "DEPLOYMENT_EXISTS", "This model already has a deployment with that name.")
         cfg = {k: v for k, v in (("max_active_requests", body.max_active_requests),
                                  ("max_queue_length", body.max_queue_length),
-                                 ("load_seconds", body.load_seconds)) if v is not None}
+                                 ("load_seconds", body.load_seconds), ("keep_warm", body.keep_warm),
+                                 ("keep_alive", body.keep_alive)) if v is not None}
         d = ModelDeployment(model_id=m.id, deployment_name=body.name, endpoint_reference="litellm",
                             node_id=body.node_id, litellm_model=body.litellm_model,
                             runtime_model=body.runtime_model, weight=body.weight,
@@ -233,7 +253,8 @@ async def update_deployment(deployment_id: uuid.UUID, body: DeploymentUpdate,
                             actor: User = Depends(require_super_admin),
                             litellm: LiteLLMClient = Depends(get_litellm)):
     changes = body.model_dump(exclude_unset=True)
-    cfg_keys = {k: changes.pop(k) for k in ("max_active_requests", "max_queue_length", "load_seconds")
+    cfg_keys = {k: changes.pop(k) for k in ("max_active_requests", "max_queue_length", "load_seconds",
+                                            "keep_warm", "keep_alive")
                 if k in changes and changes[k] is not None}
 
     def q(db):

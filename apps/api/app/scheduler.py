@@ -48,7 +48,7 @@ local act = {}
 local h = redis.call('HGETALL', KEYS[4])
 for i = 1, #h, 2 do act[h[i]] = tonumber(h[i + 1]) end
 local names = {}
-for name, _ in pairs(cfg) do if name ~= '_idle' then names[#names + 1] = name end end
+for name, _ in pairs(cfg) do if name ~= '_idle' and name ~= '_burst' then names[#names + 1] = name end end
 table.sort(names)
 
 local head, held, held_total = {}, {}, 0
@@ -74,10 +74,20 @@ for _, c in ipairs(names) do
     cands[#cands + 1] = {
       c = c, under = (a < r) and 0 or 1, p = tonumber(cfg[c]['p']),
       seq = head[c][2], id = head[c][1], r = r, a = a,
+      crit = (tonumber(cfg[c]['k'] or 0) == 1) and 0 or 1,
     }
   end
 end
+-- Critical classes go first, but only `burst` times in a row while a non-critical class is waiting.
+local critkey = 'nexora:critrun:' .. ARGV[7]
+local others_wait = false
+for _, k in ipairs(cands) do if k.crit == 1 then others_wait = true end end
+local use_crit = true
+if others_wait and (tonumber(redis.call('GET', critkey) or 0) >= tonumber(cfg['_burst'] or 4)) then
+  use_crit = false
+end
 table.sort(cands, function(x, y)
+  if use_crit and x.crit ~= y.crit then return x.crit < y.crit end
   if x.under ~= y.under then return x.under < y.under end
   if x.p ~= y.p then return x.p < y.p end
   return x.seq < y.seq
@@ -97,6 +107,7 @@ for _, k in ipairs(cands) do
     redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), k.id)
     redis.call('HINCRBY', KEYS[4], k.c, 1)
     redis.call('SET', 'nexora:rclass:' .. k.id, k.c, 'EX', 86400)
+    if k.crit == 0 and others_wait then redis.call('INCR', critkey); redis.call('EXPIRE', critkey, 86400) else redis.call('DEL', critkey) end
     if KEYS[3] ~= '' then
       redis.call('ZADD', KEYS[3], tonumber(ARGV[3]), k.id)
       redis.call('SET', 'nexora:rnode:' .. k.id, ARGV[5], 'EX', 86400)

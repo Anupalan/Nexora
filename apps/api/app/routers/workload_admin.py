@@ -18,11 +18,13 @@ router = APIRouter(prefix="/admin", tags=["workload classes"])
 class ClassIn(BaseModel):
     reserved_pct: int = Field(ge=0, le=100)
     priority: int = Field(default=5, ge=1, le=99)
+    critical: bool = False  # served before every other class at a free slot (bounded by critical_burst)
 
 
 class ConfigIn(BaseModel):
     classes: dict[str, ClassIn]
     borrow_idle_after_s: int = Field(default=60, ge=0, le=86_400)
+    critical_burst: int = Field(default=4, ge=1, le=1000)
 
 
 class AssignIn(BaseModel):
@@ -48,7 +50,8 @@ async def put_classes(body: ConfigIn, actor: User = Depends(require_super_admin)
     def q(db):
         current = workload.load_config(db)
         try:
-            cfg = workload.validate({k: v.model_dump() for k, v in body.classes.items()}, body.borrow_idle_after_s)
+            cfg = workload.validate({k: v.model_dump() for k, v in body.classes.items()}, body.borrow_idle_after_s,
+                                 body.critical_burst)
         except ValueError as e:
             raise ApiError(422, "VALIDATION_ERROR", str(e))
         removed = sorted(set(current.classes) - set(cfg.classes))
@@ -60,7 +63,8 @@ async def put_classes(body: ConfigIn, actor: User = Depends(require_super_admin)
         db.add(row)
         audit(db, actor, "workload.classes", "workload_classes", workload.SETTING_KEY,
               classes={k: v["reserved_pct"] for k, v in cfg.classes.items()},
-              borrow_idle_after_s=cfg.borrow_idle_after_s)
+              borrow_idle_after_s=cfg.borrow_idle_after_s, critical_burst=cfg.critical_burst,
+              critical=sorted(k for k, v in cfg.classes.items() if v.get("critical")))
         db.commit()
         return _view(db, cfg)
     return await dbcall(q)

@@ -279,8 +279,10 @@ class FakeOllama:
     def __init__(self):
         self.nodes: dict[str, dict] = {}
 
-    def add(self, host, *, version="0.40.5", tags=None, resident=(), down=False):
-        self.nodes[host] = {"version": version, "tags": tags or {}, "resident": list(resident), "down": down}
+    def add(self, host, *, version="0.40.5", tags=None, resident=(), down=False, sizes=None):
+        self.nodes[host] = {"version": version, "tags": tags or {}, "resident": list(resident), "down": down,
+                            "sizes": sizes or {}, "expires": {}, "generate_fail": False}
+        self.generates: list[dict] = getattr(self, "generates", [])
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         n = self.nodes.get(req.url.host)
@@ -290,11 +292,22 @@ class FakeOllama:
             return httpx.Response(200, json={"version": n["version"]})
         if req.url.path == "/api/tags":
             return httpx.Response(200, json={"models": [
-                {"name": k, "digest": v + "0" * (64 - len(v)), "size": 1} for k, v in n["tags"].items()]})
+                {"name": k, "digest": v + "0" * (64 - len(v)), "size": n["sizes"].get(k, 1)}
+                for k, v in n["tags"].items()]})
         if req.url.path == "/api/ps":
             return httpx.Response(200, json={"models": [
-                {"name": r, "size": 15_000_000_000, "context_length": 65536, "expires_at": "2026-11-09T00:00:00Z"}
+                {"name": r, "size": n["sizes"].get(r, 15_000_000_000), "context_length": 65536,
+                 "expires_at": n["expires"].get(r, "2999-01-01T00:00:00Z")}
                 for r in n["resident"]]})
+        if req.url.path == "/api/generate":
+            body = json.loads(req.content)
+            self.generates.append({"host": req.url.host, **body})
+            if n["generate_fail"] or body["model"] not in n["tags"]:
+                return httpx.Response(500, json={"error": "boom"})
+            if body["model"] not in n["resident"]:
+                n["resident"].append(body["model"])
+            n["expires"][body["model"]] = "2999-01-01T00:00:00Z"
+            return httpx.Response(200, json={"done": True})
         return httpx.Response(404)
 
 

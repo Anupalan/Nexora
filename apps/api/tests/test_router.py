@@ -158,3 +158,30 @@ def test_reason_explains_the_numbers():
 
 
 _ = (asyncio, httpx, inference, Api, bearer, mk_key, aclient, post, until)
+
+
+def test_faster_node_wins_at_equal_load():
+    from app.router import choose, Policy
+    slow = cand("slow", resident=True, svc_by_class={"pms": 6.0}, avg_service_s=6.0)
+    fast = cand("fast", resident=True, svc_by_class={"pms": 1.5}, avg_service_s=6.0)
+    for i in range(20):
+        d = choose([slow, fast], Policy(), est_tokens=10, request_id=f"r{i}", klass="pms")
+        assert d.chosen.name == "fast"
+        assert d.candidates[0]["service_measured"] is True
+
+
+def test_class_history_not_polluted_by_other_work():
+    from app.router import choose, Policy
+    # a node whose all-class average is dragged up by long extraction jobs is still fast for chat
+    a = cand("a", resident=True, avg_service_s=20.0, svc_by_class={"pms": 1.0, "extraction": 40.0})
+    b = cand("b", resident=True, avg_service_s=3.0, svc_by_class={"pms": 3.0})
+    assert choose([a, b], Policy(), est_tokens=10, request_id="x", klass="pms").chosen.name == "a"
+    assert choose([a, b], Policy(), est_tokens=10, request_id="x", klass="extraction").chosen.name == "b"
+
+
+def test_unmeasured_node_is_not_shunned():
+    from app.router import choose, Policy
+    measured = cand("m", resident=True, avg_service_s=2.0)
+    fresh = cand("n", resident=True)  # no history: borrows the measured median, so it ties and gets traffic
+    names = {choose([measured, fresh], Policy(), est_tokens=10, request_id=f"r{i}").chosen.name for i in range(30)}
+    assert names == {"m", "n"}

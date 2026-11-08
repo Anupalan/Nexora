@@ -47,7 +47,8 @@ def test_validation():
     with pytest.raises(ValueError):
         validate({"ok1": {"reserved_pct": 5}}, -1)
     cfg = json.loads(claim_json(4, WorkloadConfig()))
-    assert cfg["_idle"] == 60 and cfg["pms"] == {"r": 2, "p": 2} and cfg["extraction"]["p"] == 1
+    assert cfg["_idle"] == 60 and cfg["pms"] == {"r": 2, "p": 2, "k": 0} and cfg["extraction"]["p"] == 1
+    assert cfg["extraction"]["k"] == 1 and cfg["_burst"] == 4  # extraction is critical by default
 
 
 def test_unknown_class_names_fall_back_to_standard():
@@ -154,20 +155,24 @@ async def test_a_recently_active_class_keeps_its_reserved_slots(sched):
     assert not await claim(sched, "p3")
 
 
+NONCRIT = validate({"pms": {"reserved_pct": 50, "priority": 2}, "coding": {"reserved_pct": 25, "priority": 3},
+                    "extraction": {"reserved_pct": 25, "priority": 1}}, 60)  # same lanes, nothing critical
+
+
 @pytest.mark.anyio
 async def test_holding_never_blocks_the_only_slot(sched):
     # one slot (a node that runs requests one at a time): pms was just active, yet extraction may use the slot
     await enqueue(sched, "p0", "pms")
-    assert await claim(sched, "p0", 1)
+    assert await claim(sched, "p0", 1, NONCRIT)
     await sched.release_active(DEP, "p0")
     await enqueue(sched, "e0", "extraction")
-    assert await claim(sched, "e0", 1)  # not held back: an idle GPU helps nobody
+    assert await claim(sched, "e0", 1, NONCRIT)  # not held back: an idle GPU helps nobody
     await enqueue(sched, "p1", "pms")
     await enqueue(sched, "e1", "extraction")
-    assert not await claim(sched, "p1", 1)  # running work is never preempted
+    assert not await claim(sched, "p1", 1, NONCRIT)  # running work is never preempted
     await sched.release_active(DEP, "e0")
-    assert not await claim(sched, "e1", 1)  # older extraction loses the slot...
-    assert await claim(sched, "p1", 1)      # ...to pms, which is under its reservation
+    assert not await claim(sched, "e1", 1, NONCRIT)  # older extraction loses the slot...
+    assert await claim(sched, "p1", 1, NONCRIT)      # ...to pms, which is under its reservation
 
 
 def test_expected_wait_never_assumes_every_slot_is_held():
@@ -216,12 +221,12 @@ async def test_priority_decides_between_classes_that_are_only_borrowing(sched):
 async def test_being_under_a_reservation_beats_priority_and_age(sched):
     # extraction (priority 1) already holds its one reserved slot, so a second extraction request is only borrowing
     await enqueue(sched, "e_run", "extraction")
-    assert await claim(sched, "e_run")
+    assert await claim(sched, "e_run", 4, NONCRIT)
     await enqueue(sched, "e1", "extraction")  # older, and extraction has the better priority...
     await enqueue(sched, "p0", "pms")         # ...but pms is still under its own reservation
-    assert not await claim(sched, "e1")       # the slot is pms's to reclaim
-    assert await claim(sched, "p0")
-    assert await claim(sched, "e1")           # extraction may borrow what is left after pms's held slot
+    assert not await claim(sched, "e1", 4, NONCRIT)       # the slot is pms's to reclaim
+    assert await claim(sched, "p0", 4, NONCRIT)
+    assert await claim(sched, "e1", 4, NONCRIT)           # extraction may borrow what is left after pms's held slot
 
 
 @pytest.mark.anyio
@@ -347,3 +352,64 @@ async def test_a_chat_request_is_not_stuck_behind_an_extraction_burst(gw, monkey
     assert all(r.status_code == 200 for r in results)
     assert results[0].headers["x-nexora-class"] == "pms"
     assert llm.max_inflight <= 4
+
+
+# ============================================================ critical class (extraction goes first)
+
+@pytest.mark.anyio
+async def test_a_critical_class_goes_before_a_class_under_its_reservation(sched):
+    # one slot; pms is under its reservation and older, yet critical extraction takes the next free slot
+    await enqueue(sched, "x0", "extraction")
+    assert await claim(sched, "x0", 1)
+    await enqueue(sched, "p1", "pms")
+    await enqueue(sched, "x1", "extraction")
+    await sched.release_active(DEP, "x0")
+    assert not await claim(sched, "p1", 1)  # pms waits...
+    assert await claim(sched, "x1", 1)      # ...critical extraction goes first
+    # contrast: with nothing critical, pms (under its reservation) wins - see the NONCRIT test above
+
+
+@pytest.mark.anyio
+async def test_critical_work_cannot_starve_the_others_beyond_the_burst(sched):
+    # normal order (once the burst is used up) favours pms, so we can see the guard hand it a turn
+    cfg = validate({"pms": {"reserved_pct": 50, "priority": 1},
+                    "extraction": {"reserved_pct": 25, "priority": 2, "critical": True}}, 60, critical_burst=3)
+    await enqueue(sched, "p1", "pms")
+    ex = [f"x{i}" for i in range(8)]
+    for r in ex:
+        await enqueue(sched, r, "extraction")
+    order = []
+    for _ in range(5):
+        for rid in ["p1", *ex]:
+            if rid not in order and await claim(sched, rid, 1, cfg):
+                order.append(rid)
+                await sched.release_active(DEP, rid)
+                break
+    assert order[:3] == ["x0", "x1", "x2"]  # critical goes first, three times in a row...
+    assert order[3] == "p1"                 # ...then the waiting class gets its turn
+    assert order[4] == "x3"                 # and the burst counter restarts
+
+
+@pytest.mark.anyio
+async def test_critical_alone_is_unrestricted(sched):
+    cfg = validate({"extraction": {"reserved_pct": 25, "priority": 1, "critical": True}}, 60, critical_burst=1)
+    ids = [f"x{i}" for i in range(4)]
+    for r in ids:
+        await enqueue(sched, r, "extraction")
+    got = []
+    for rid in ids:
+        assert await claim(sched, rid, 1, cfg)  # no one else waits, so the burst limit never applies
+        await sched.release_active(DEP, rid)
+        got.append(rid)
+    assert got == ids
+
+
+def test_router_counts_critical_backlog_ahead_of_other_classes():
+    cfg = WorkloadConfig()
+    base = lanes(max_active=4, cls_seen={"pms": True, "extraction": True}, avg_service_s=2.0,
+                 class_crit={n: bool(c.get("critical")) for n, c in cfg.classes.items()})
+    quiet = expected_wait(Candidate(**{**base.__dict__, "cls_queued": {}}), Policy(), "pms")
+    swamped = expected_wait(Candidate(**{**base.__dict__, "cls_queued": {"extraction": 6}}), Policy(), "pms")
+    assert swamped > quiet  # chat now sees critical extraction work as ahead of it
+    crit_self = expected_wait(Candidate(**{**base.__dict__, "cls_queued": {"pms": 6}}), Policy(), "extraction")
+    assert crit_self <= quiet + 1e-9  # extraction does not wait behind pms

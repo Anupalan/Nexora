@@ -57,7 +57,7 @@ export default function Routing() {
       <div className="card flush">
         {nodes === null ? <Loading /> : nodes.length === 0 ? <EmptyState icon={<IconRoute />} title="No nodes registered" hint="Register an inference node (POST /admin/nodes) to enable residency-aware routing." /> : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Node</th><th>Status</th><th>Ollama</th><th>Loaded models</th><th>Concurrency cap</th><th /></tr></thead>
+            <thead><tr><th>Node</th><th>Status</th><th>Ollama</th><th>Loaded models</th><th>Concurrency cap</th><th>Memory budget</th><th /></tr></thead>
             <tbody>{nodes.map((n) => (
               <tr key={n.id}>
                 <td><b>{n.name}</b><div className="muted">{n.runtime_url ?? "no runtime URL"}</div></td>
@@ -66,6 +66,8 @@ export default function Routing() {
                 <td className="muted">{n.resident.length ? n.resident.map((r) => `${r.model}${r.context_length ? ` (${Math.round(r.context_length / 1024)}k ctx)` : ""}`).join(", ") : "nothing loaded"}</td>
                 <td>{n.max_concurrent ?? "none"}{" "}
                   <button className="ghost sm" onClick={() => { const v = prompt("Max concurrent requests across all models on this node (empty = no cap)", String(n.max_concurrent ?? "")); if (v !== null) run(() => api(`/admin/nodes/${n.id}`, { method: "PATCH", json: { max_concurrent: v === "" ? null : Number(v) } })); }}>Edit</button></td>
+                <td>{n.memory_budget_gb ? `${n.memory_budget_gb} GB` : "not set"}{" "}
+                  <button className="ghost sm" onClick={() => { const v = prompt("Memory (GB) Nexora may keep models loaded in on this node. Required before it will preload a model that is not already loaded (empty = none)", String(n.memory_budget_gb ?? "")); if (v !== null) run(() => api(`/admin/nodes/${n.id}`, { method: "PATCH", json: { memory_budget_gb: v === "" ? null : Number(v) } })); }}>Edit</button></td>
                 <td className="actions"><span className="actions-inline">
                   <button className="ghost sm" onClick={() => run(() => api(`/admin/nodes/${n.id}/sample`, { method: "POST" }))}>Sample now</button>
                   <button className="ghost sm" onClick={() => run(() => api(`/admin/nodes/${n.id}`, { method: "PATCH", json: { enabled: !n.enabled } }))}>{n.enabled ? "Disable" : "Enable"}</button></span></td>
@@ -79,12 +81,15 @@ export default function Routing() {
       <div className="card flush">
         {deps === null ? <Loading /> : deps.length === 0 ? <EmptyState icon={<IconRoute />} title="No deployments" /> : (
           <div className="table-wrap"><table>
-            <thead><tr><th>Deployment</th><th>Health</th><th>Model loaded</th><th>Queued</th><th>Running</th><th>Lanes (running/reserved)</th><th>Weight</th><th>Build</th><th /></tr></thead>
+            <thead><tr><th>Deployment</th><th>Health</th><th>Model loaded</th><th>Keep warm</th><th>Queued</th><th>Running</th><th>Lanes (running/reserved)</th><th>Weight</th><th>Build</th><th /></tr></thead>
             <tbody>{deps.map((d) => (
               <tr key={d.id}>
                 <td><b>{d.name}</b><div className="muted">{d.model}{d.node ? ` · ${d.node}` : ""}</div></td>
                 <td>{!d.enabled ? <Badge value="disabled" /> : d.draining ? <Badge value="draining" tone="warn" /> : <Badge value={d.health} />}</td>
                 <td>{d.resident === null ? <span className="muted">unknown</span> : d.resident ? <Badge value="loaded" tone="ok" /> : <Badge value="cold" tone="warn" />}</td>
+                <td>{d.keep_warm ? <Badge value="on" tone="ok" /> : <span className="muted">off</span>}{d.warm?.ok === false && <div className="err">{d.warm.detail}</div>}{" "}
+                  <button className="ghost sm" onClick={() => run(() => api(`/admin/deployments/${d.id}`, { method: "PATCH", json: { keep_warm: !d.keep_warm } }))}>{d.keep_warm ? "Stop" : "Start"}</button>
+                  {d.keep_warm && <button className="ghost sm" onClick={() => run(() => api(`/admin/deployments/${d.id}/warm`, { method: "POST" }))}>Warm now</button>}</td>
                 <td>{d.queued}</td><td>{d.active} / {d.max_active}</td>
                 <td className="muted" style={{ whiteSpace: "normal" }}>{Object.entries(d.classes ?? {}).filter(([, v]) => v.reserved || v.active || v.queued).map(([k, v]) => <span key={k} style={{ marginRight: 10 }}>{k} <b>{v.active}/{v.reserved}</b>{v.queued ? ` (+${v.queued} waiting)` : ""}</span>)}</td>
                 <td>{d.weight}{" "}<button className="ghost sm" onClick={() => { const v = prompt("Weight (0 stops routing here)", String(d.weight)); if (v !== null && v !== "") run(() => api(`/admin/deployments/${d.id}`, { method: "PATCH", json: { weight: Number(v) } })); }}>Edit</button></td>
@@ -102,7 +107,7 @@ export default function Routing() {
       <div className="card form-card">
         <p className="muted" style={{ marginTop: 0 }}>
           Each class reserves a share of every deployment&apos;s slots. A class under its reservation gets the next free slot;
-          otherwise lower priority numbers go first (extraction = 1). Idle reserved slots can be borrowed unless the
+          otherwise lower priority numbers go first (extraction = 1). A critical class (extraction) is served before every other class, bounded so it cannot starve them. Idle reserved slots can be borrowed unless the
           class was active within the window below. Assign a class to a project or key on those pages.
         </p>
         {wl && (
@@ -110,21 +115,24 @@ export default function Routing() {
             e.preventDefault();
             const f = new FormData(e.currentTarget);
             const classes = Object.fromEntries(Object.keys(wl.classes).map((k) => [k,
-              { reserved_pct: Number(f.get(`pct-${k}`)), priority: Number(f.get(`pri-${k}`)) }]));
+              { reserved_pct: Number(f.get(`pct-${k}`)), priority: Number(f.get(`pri-${k}`)), critical: f.get(`crit-${k}`) === "on" }]));
             run(async () => { setWl(await api<WorkloadConfig>("/admin/workload-classes", { method: "PUT", json: {
-              classes, borrow_idle_after_s: Number(f.get("idle")) } })); });
+              classes, borrow_idle_after_s: Number(f.get("idle")), critical_burst: Number(f.get("burst")) } })); });
           }}>
             <div className="table-wrap"><table>
-              <thead><tr><th>Class</th><th>Reserved %</th><th>Priority (1 = first)</th></tr></thead>
+              <thead><tr><th>Class</th><th>Reserved %</th><th>Priority (1 = first)</th><th>Critical</th></tr></thead>
               <tbody>{Object.entries(wl.classes).map(([k, v]) => (
                 <tr key={k}><td><b>{k}</b></td>
                   <td><input name={`pct-${k}`} type="number" min={0} max={100} defaultValue={v.reserved_pct} style={{ width: 90 }} /></td>
-                  <td><input name={`pri-${k}`} type="number" min={1} max={99} defaultValue={v.priority} style={{ width: 90 }} /></td></tr>
+                  <td><input name={`pri-${k}`} type="number" min={1} max={99} defaultValue={v.priority} style={{ width: 90 }} /></td>
+                  <td><input name={`crit-${k}`} type="checkbox" defaultChecked={!!v.critical} /></td></tr>
               ))}</tbody>
             </table></div>
             <div className="row" style={{ marginTop: 12 }}>
               <label>Hold a class&apos;s reserved slots for (seconds after it was last active; 0 = never hold)
                 <input name="idle" type="number" min={0} max={86400} defaultValue={wl.borrow_idle_after_s} style={{ width: 120 }} /></label>
+              <label>Critical classes may go first at most this many times in a row while others wait
+                <input name="burst" type="number" min={1} max={1000} defaultValue={wl.critical_burst ?? 4} style={{ width: 90 }} /></label>
               <button>Save classes</button>
             </div>
           </form>
