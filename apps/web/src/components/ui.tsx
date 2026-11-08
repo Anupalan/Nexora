@@ -7,6 +7,7 @@ const TONES: Record<string, Tone> = {
   running: "info", queued: "warn", cancelling: "warn", pending: "warn", planned: "",
   failed: "bad", revoked: "bad", suspended: "bad", rejected: "bad", disabled: "",
   cancelled: "", archived: "", inactive: "", expired: "bad",
+  critical: "bad", warning: "warn", info: "info", unhealthy: "bad", unknown: "",
 };
 
 /** Status pill. Colour is derived from the value, so every page renders states consistently. */

@@ -1,0 +1,34 @@
+# Prometheus scrape config. Prometheus and Grafana are admin-only (roadmap §28): keep them on the
+# private network. Replace the targets with your hosts.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: nexora-api
+    metrics_path: /metrics
+    # Set METRICS_TOKEN on the API; /metrics returns 404 until it is configured.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/nexora-metrics-token
+    static_configs:
+      - targets: ["api:8001"]
+
+  - job_name: dgx-spark-gpu          # NVIDIA DCGM exporter on the DGX Spark (private VPN address)
+    static_configs:
+      - targets: ["DGX_SPARK_PRIVATE_IP:9400"]
+
+  - job_name: node                   # node_exporter on each host (app server, DGX Spark, workspace host)
+    static_configs:
+      - targets: ["app-host:9100", "DGX_SPARK_PRIVATE_IP:9100"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]

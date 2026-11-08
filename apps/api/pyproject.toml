@@ -13,6 +13,7 @@ dependencies = [
   "pydantic[email]>=2.7",
   "pydantic-settings>=2.3",
   "redis>=5.0",
+  "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]

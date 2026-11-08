@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { ComponentType, ReactNode } from "react";
-import { api } from "@/lib/api";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { api, type AlertRow } from "@/lib/api";
 import { SessionGate, useUser } from "@/lib/session";
 import {
-  IconChart, IconCpu, IconDashboard, IconFolder, IconGauge, IconKey, IconLogo, IconLogout,
-  IconQueue, IconShield, IconTeam, IconUsers,
+  IconActivity, IconBell, IconChart, IconCpu, IconDashboard, IconFolder, IconGauge, IconKey, IconLogo, IconLogout,
+  IconQueue, IconServer, IconShield, IconTeam, IconUsers,
 } from "@/components/icons";
 
 type Item = [href: string, label: string, Icon: ComponentType<{ size?: number }>];
@@ -17,6 +17,15 @@ function Shell({ children }: { children: ReactNode }) {
   const path = usePathname();
   const router = useRouter();
   const admin = user.role === "super_admin";
+  const [openAlerts, setOpenAlerts] = useState(0);
+  useEffect(() => {
+    if (!admin) return;
+    const load = () => api<AlertRow[]>("/admin/alerts?status=open&limit=200")
+      .then((a) => setOpenAlerts(a.length)).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [admin]);
   const lead = admin || user.role === "team_admin";
   const groups: [string, Item[]][] = [
     ["Overview", [["/dashboard", "Dashboard", IconDashboard]]],
@@ -32,6 +41,9 @@ function Shell({ children }: { children: ReactNode }) {
       ...(lead ? ([["/users", "Developers", IconUsers]] as Item[]) : []),
     ]],
     ...(admin ? ([["Administration", [
+      ["/admin", "Admin Overview", IconActivity],
+      ["/inference", "Inference Servers", IconServer],
+      ["/alerts", "Alerts", IconBell],
       ["/quotas", "Quota Policies", IconGauge],
       ["/audit", "Audit Logs", IconShield],
     ]]] as [string, Item[]][]) : []),
@@ -56,6 +68,7 @@ function Shell({ children }: { children: ReactNode }) {
                 <Link key={href} href={href} className={path.startsWith(href) ? "active" : ""}
                   aria-current={path.startsWith(href) ? "page" : undefined}>
                   <Icon /><span>{label}</span>
+                  {href === "/alerts" && openAlerts > 0 && <em className="count">{openAlerts}</em>}
                 </Link>
               ))}
             </div>

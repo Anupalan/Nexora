@@ -1,0 +1,59 @@
+# Prometheus alerting rules (roadmap §30). Nexora also raises in-app alerts for the same conditions;
+# these cover failures Nexora cannot see about itself (API down, disk, GPU, backups).
+groups:
+  - name: nexora
+    rules:
+      - alert: NexoraApiDown
+        expr: up{job="nexora-api"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Nexora API is not being scraped"}
+
+      - alert: InferenceModelUnhealthy
+        expr: nexora_model_healthy == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Model {{ $labels.model }} failed its health check"}
+
+      - alert: QueueDepthHigh
+        expr: nexora_queue_depth > 20
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "{{ $value }} requests waiting for {{ $labels.model }}"}
+
+      - alert: QueueWaitHigh
+        expr: nexora_queue_wait_seconds_avg_5m > 30
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Average queue wait above 30s"}
+
+      - alert: CriticalNexoraAlertsOpen
+        expr: nexora_alerts_open{severity="critical"} > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "Critical in-app alerts are open in Nexora"}
+
+      - alert: DiskUsageHigh
+        expr: |
+          (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) > 0.85
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Disk above 85% on {{ $labels.instance }} ({{ $labels.mountpoint }})"}
+
+      - alert: MemoryPressure
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Less than 10% memory available on {{ $labels.instance }}"}
+
+      - alert: BackupStale
+        expr: time() - nexora_backup_last_success_timestamp_seconds > 129600   # 36h
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "No successful database backup in 36 hours"}
+
+      - alert: RestoreTestFailed
+        expr: nexora_backup_restore_test_ok == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "The last backup restore test failed"}

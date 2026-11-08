@@ -45,6 +45,21 @@ class LiteLLMClient:
     def delete_key(self, key_id: str) -> None:
         self._manage("/key/delete", {"keys": [key_id]})
 
+    def health(self, model_name: str, timeout: float) -> dict:
+        """Probe one model through LiteLLM's /health?model=... (it makes a minimal backend call)."""
+        try:
+            with httpx.Client(timeout=timeout, transport=self._transport) as c:
+                r = c.get(f"{self.base_url}/health", params={"model": model_name},
+                          headers={"Authorization": f"Bearer {self.master_key}"})
+        except httpx.HTTPError as e:
+            return {"healthy": False, "detail": f"gateway unreachable: {type(e).__name__}"}
+        if r.status_code >= 400:
+            return {"healthy": False, "detail": f"gateway returned {r.status_code}"}
+        data = r.json()
+        healthy, bad = int(data.get("healthy_count") or 0), int(data.get("unhealthy_count") or 0)
+        ok = healthy > 0 and bad == 0
+        return {"healthy": ok, "detail": "ok" if ok else f"{bad} unhealthy / {healthy} healthy endpoints"}
+
     # ---- request forwarding (async, caller's own virtual key) --------------------------
     async def forward(self, path: str, body: dict, caller_key: str) -> httpx.Response:
         """Send a streaming request; caller must iterate and close the response."""

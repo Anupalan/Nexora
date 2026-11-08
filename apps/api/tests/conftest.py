@@ -53,10 +53,20 @@ def redis_url():
 
 
 @pytest.fixture(autouse=True)
+def _stable_minute_window():
+    """Quota windows are UTC-aligned (per minute). A test that straddles :00 would see its counters
+    reset mid-test and fail at random, so start tests only when the current window has >=4s left."""
+    left = 60 - (time.time() % 60)
+    if left < 4:
+        time.sleep(left + 0.05)
+
+
+@pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path, redis_url):
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("SWEEPER_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("OPS_LOOP_ENABLED", "false")
     get_settings.cache_clear()
     sync_redis.Redis.from_url(redis_url).flushall()
     dbm.configure_engine(f"sqlite:///{tmp_path}/test.db")
@@ -159,6 +169,7 @@ class FakeLiteLLM:
         self.aliases: dict[str, str] = {}  # key_alias -> key (real LiteLLM: aliases must be unique)
         self.tokens: dict[str, str] = {}  # hashed token -> key
         self.down = False
+        self.unhealthy = False  # LiteLLM /health reports the backend as down
         self.gate = None  # asyncio.Event: inference calls wait on it until set
         self.inflight = 0
         self.max_inflight = 0
@@ -172,6 +183,9 @@ class FakeLiteLLM:
             raise httpx.ConnectError("down")
         body = json.loads(req.content) if req.content else {}
         self.calls.append({"path": req.url.path, "auth": req.headers.get("authorization"), "body": body})
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"healthy_count": 0 if self.unhealthy else 1,
+                                             "unhealthy_count": 1 if self.unhealthy else 0})
         if req.url.path == "/key/generate":
             alias = body.get("key_alias")
             if alias and alias in self.aliases:

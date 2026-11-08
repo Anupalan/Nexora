@@ -3,7 +3,7 @@
 **One Platform. Every Intelligence.** Unified access to AI models, coding agents and intelligent
 workflows — Model Gateway · AI Workspace · Agent Orchestration · Usage Intelligence.
 
-Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phase 3 (quotas, FIFO scheduler, usage)** on top of Phases 1–2.
+Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phase 4 (admin analytics and operations)** on top of Phases 1–3. See `docs/operations.md`.
 
 ## Layout
 - `apps/api` — FastAPI management API (auth, RBAC, users, teams, projects, audit), Alembic migrations
@@ -28,6 +28,21 @@ cd apps/web && pnpm install && pnpm dev
 ```
 Tests: `cd apps/api && .venv/bin/pytest` (SQLite database; needs `redis-server` on PATH, or set
 `TEST_REDIS_URL`, because the Lua-based reservation/queue logic is tested against a real Redis).
+
+## Phase 4 status (admin analytics and operations)
+Done: admin overview (active developers, requests, tokens, queue, failures, time to first token,
+generation speed); per-deployment **health checks through LiteLLM** every 30s; **in-app alerts** that
+raise and auto-resolve (inference unavailable, queue depth/wait, quota approaching/exceeded, repeated
+sign-in failures) with a count badge in the nav; audit-log search (text, entity, date range);
+**Prometheus `/metrics`** (token-protected, 404 until `METRICS_TOKEN` is set); Prometheus config, alert
+rules and a Grafana dashboard under `infra/monitoring`; **backup and restore-test scripts** under
+`infra/backup` (tested, including tampered/truncated backups and failure metrics); runbooks in
+`docs/operations.md`.
+
+Not verified / not done: GPU and unified-memory panels need the DGX Spark's DCGM exporter (not available
+here); the Prometheus rules and Grafana dashboard are syntax-checked but were not loaded into running
+Prometheus/Grafana (no Docker here); no email/webhook notification channels; no WAL/PITR; no
+off-host upload in the backup script; workspace-worker health arrives with the workspace (Phase 5).
 
 ## Local end-to-end demo (roadmap §51)
 `infra/mock-llm` is a mock LiteLLM + vLLM (virtual keys with model allow-lists, streaming, usage) for

@@ -9,9 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app import ops
 from app.config import get_settings
 from app.db import get_engine, session_scope
 from app.inference import dbcall, get_scheduler, sweep_once
+from app.litellm import get_litellm
 from app.routers import (
     admin,
     auth,
@@ -53,10 +55,25 @@ async def lifespan(_: FastAPI):
             except TimeoutError:
                 pass
 
-    task = asyncio.create_task(sweeper())
+    async def ops_loop():
+        litellm = get_litellm()
+        while not stop.is_set():
+            try:
+                await ops.ops_cycle(sched, litellm)
+            except Exception:  # noqa: BLE001 - monitoring must never take the API down
+                logging.getLogger("nexora").exception("ops cycle failed")
+            try:
+                await asyncio.wait_for(stop.wait(), settings.health_check_interval_seconds)
+            except TimeoutError:
+                pass
+
+    tasks = [asyncio.create_task(sweeper())]
+    if settings.ops_loop_enabled:
+        tasks.append(asyncio.create_task(ops_loop()))
     yield
     stop.set()
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title=f"{settings.app_name} API", version="0.1.0", lifespan=lifespan)
@@ -110,6 +127,7 @@ for r in (auth.router, users.router, teams.router, projects.router, admin.router
           keys.router, models.router, quotas.router, queue.router, usage.router):
     app.include_router(r, prefix="/api/v1")
 app.include_router(gateway.router)
+app.include_router(admin.metrics_router)
 
 
 @app.get("/health/live", tags=["health"])

@@ -24,3 +24,6 @@ export const IconCode = P(<><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" /></
 export const IconBot = P(<><rect x="4" y="8" width="16" height="11" rx="3" /><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6" /></>);
 export const IconGateway = P(<><circle cx="5" cy="12" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><path d="M7 12h4l6-5M11 12l6 5" /></>);
 export const IconInbox = P(<><path d="M3 13l3-8h12l3 8" /><path d="M3 13v6h18v-6h-5a4 4 0 0 1-8 0z" /></>);
+export const IconBell = P(<><path d="M6 9a6 6 0 1 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z" /><path d="M10 20a2 2 0 0 0 4 0" /></>);
+export const IconServer = P(<><rect x="3" y="4" width="18" height="6" rx="2" /><rect x="3" y="14" width="18" height="6" rx="2" /><path d="M7 7h.01M7 17h.01" /></>);
+export const IconActivity = P(<path d="M3 12h4l3-8 4 16 3-8h4" />);

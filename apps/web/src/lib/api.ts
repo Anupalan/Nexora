@@ -85,3 +85,21 @@ export interface QuotaRow {
   tokens_per_minute: number | null; tokens_per_day: number | null; tokens_per_month: number | null;
   max_concurrent: number | null; max_output_tokens: number | null;
 }
+
+export interface Dashboard {
+  today: { active_developers: number; requests: number; failed_requests: number; rejected_requests: number;
+    input_tokens: number; output_tokens: number; avg_ttft_ms: number | null;
+    avg_generation_tokens_per_s: number | null };
+  totals: { users: number; open_alerts: number; critical_alerts: number };
+  queue: { depth: number; active: number; avg_wait_ms_5m: number | null };
+  models: { model: string; health: string; queued: number; active: number; max_active: number }[];
+  gpu: null;
+}
+export interface AlertRow {
+  id: string; type: string; severity: string; message: string; status: string;
+  created_at: string; resolved_at: string | null; auto_resolved: boolean;
+}
+export interface InferenceRow {
+  deployment_id: string; model: string; status: string; queued: number; active: number;
+  max_active: number; max_queue: number; last_check: { checked_at: string; latency_ms: number; detail: string } | null;
+}

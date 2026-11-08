@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     default_output_tokens_estimate: int = 1024
     sweeper_interval_seconds: int = 10
 
+    # Operations: health checks, alerts, metrics (roadmap §5.9, §30)
+    ops_loop_enabled: bool = True
+    health_check_interval_seconds: int = 30
+    health_timeout_seconds: float = 10.0
+    alert_queue_depth: int = 20
+    alert_queue_wait_ms: int = 30000
+    alert_quota_percent: int = 90
+    alert_auth_failures: int = 10  # failed logins in 10 minutes
+    metrics_token: str = ""  # /metrics is disabled (404) unless a bearer token is configured
+
     cors_origins: list[str] = ["http://localhost:3000"]
 
 

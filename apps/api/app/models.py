@@ -297,3 +297,21 @@ class UsageRecord(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Alert(Base):
+    """In-app alert (roadmap §5.9). One open alert per dedupe_key; resolved when the condition clears."""
+
+    __tablename__ = "alerts"
+    __table_args__ = (Index("ix_alert_status_created", "status", "created_at"),
+                      Index("ix_alert_dedupe", "dedupe_key", "status"))
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    alert_type: Mapped[str] = mapped_column(String(50), index=True)
+    severity: Mapped[str] = mapped_column(String(20))  # info | warning | critical
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | resolved
+    dedupe_key: Mapped[str] = mapped_column(String(200))
+    details: Mapped[dict] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True)  # null = auto-resolved
