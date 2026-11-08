@@ -111,6 +111,7 @@ class OpsInputs:
     digest_mismatches: list[tuple[str, list[str]]] = field(default_factory=list)  # (model, digests)
     version_skew: list[str] = field(default_factory=list)  # distinct Ollama versions when they differ
     audit_chain_problem: str | None = None  # from the last daily verification
+    sink_failures: list[tuple[str, int, str]] = field(default_factory=list)  # (sink, failures in a row, error)
 
 
 Desired = dict[str, tuple[str, str, str, dict]]  # dedupe_key -> (type, severity, message, details)
@@ -145,6 +146,10 @@ def evaluate_rules(inp: OpsInputs) -> Desired:
         want["auth_failures"] = ("repeated_auth_failures", "warning",
                                  f"{inp.auth_failures_10m} failed sign-ins in the last 10 minutes.",
                                  {"count": inp.auth_failures_10m})
+    for name, n, err in inp.sink_failures:
+        want[f"log_sink:{name}"] = ("log_sink_failing", "warning",
+                                    f"Log sink '{name}' has failed {n} times in a row ({err}). Records are kept and "
+                                    "will be sent when it recovers.", {"sink": name, "failures": n})
     if inp.audit_chain_problem:
         want["audit_chain"] = ("audit_chain_broken", "critical",
                                f"The audit log failed verification: {inp.audit_chain_problem}.",
@@ -232,12 +237,14 @@ def _db_inputs(db: DBSession):
 
 async def gather_inputs(sched: Scheduler) -> OpsInputs:
     deps, avg_wait, n_started, fails, quotas, mismatches, versions, chain_problem = await dbcall(_db_inputs)
+    from app import sinks
     inp = OpsInputs(avg_queue_wait_ms_5m=avg_wait, started_5m=n_started, auth_failures_10m=fails,
                     digest_mismatches=mismatches, version_skew=versions, audit_chain_problem=chain_problem)
     for dep_id, alias, health, max_q, max_a, dep_name, node, wfail, wdetail in deps:
         inp.deployments.append(DeploymentState(str(dep_id), alias, health, await sched.depth(dep_id),
                                                await sched.active_count(dep_id), max_q, max_a,
                                                dep_name, node, wfail, wdetail))
+    inp.sink_failures = await dbcall(sinks.failing)
     now = utcnow()
     for q in quotas:
         scope = (q.scope_type, q.scope_id)
@@ -265,12 +272,14 @@ async def ops_cycle(sched: Scheduler, litellm: LiteLLMClient) -> dict:
     from app import auditchain, retention
 
     await dbcall(auditchain.seal)  # chain any new audit rows
+    from app import sinks as log_sinks
+    exported = await log_sinks.run_all(sched)  # send new activity to configured sinks
     maint = await dbcall(retention.maintenance)  # daily: purge old detail rows, verify the audit chain
     health = await check_deployments(litellm)
     warm = await warmup.warm_cycle()  # keep opted-in models resident (after health, before alerts)
     rebalance = await rebalance_queued(sched)  # evacuate queues of unhealthy/draining deployments
     alerts = await run_alert_cycle(sched)
-    return {"health": health, "maintenance": maint, "warm": warm, "rebalance": rebalance, "alerts": alerts}
+    return {"health": health, "maintenance": maint, "sinks": exported, "warm": warm, "rebalance": rebalance, "alerts": alerts}
 
 
 # ---------------------------------------------------------------- dashboard

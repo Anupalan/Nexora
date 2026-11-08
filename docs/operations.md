@@ -122,6 +122,25 @@ Back up secrets separately, encrypted, with restricted recovery access.
   reports and the audit trail depend on them. Prompt and response content is not stored unless content logging is
   turned on, and that is off by default.
 
+## Activity export (log sinks)
+- **What is recorded per request** (never prompt or response content): who (user, team, project, key), model,
+  deployment and node, workload class, source, tokens, queue time, time to first token, duration, outcome and error
+  code, finish reason (`stop`, `length`, `tool_calls`...), number of tool calls the model made, whether the request
+  offered tools, request size, client IP and user agent. IP addresses are personal data: set `LOG_CLIENT_IP=false` to stop
+  recording them. `X-Forwarded-For` is ignored unless `TRUST_FORWARDED_FOR=true`, which is only safe behind a reverse
+  proxy you control.
+- **Sinks** send those records (stream `requests`) and/or the hash-chained audit log (stream `audit`) to your own
+  systems: a JSON-lines **file** or a **webhook**. Manage them with `/admin/log-sinks` (create, patch, delete, `/test`,
+  `/export`). A new sink starts from now; pass `backfill: true` to send history too.
+  - *File sinks* write only under the directory in `LOG_SINK_DIR` (they are refused until it is set), and the path is a
+    plain file name ending in `.jsonl`. Rotate with logrotate using `copytruncate`.
+  - *Webhooks* receive `POST {"sink": name, "records": [...]}`. Set `secret_env` to the name of an environment variable
+    holding a secret and each request carries `X-Nexora-Signature: sha256=<HMAC of the body>`; verify it on receipt. The
+    secret never lives in the database.
+- **Delivery is at-least-once.** A cursor advances only after the destination accepts a batch; failures retry on the
+  next cycle, and three in a row raise a `log_sink_failing` alert. A crash can repeat a batch, so de-duplicate on `id`
+  (requests) or `seq` (audit). Requests are exported 15 seconds after they finish so a late commit is not skipped.
+
 ## Keeping models warm
 - A cold load costs seconds (about 5-6 s for the 8B model). Turn on *Keep warm* for a deployment (Routing page, or
   `PATCH /admin/deployments/{id}` with `keep_warm: true` and optionally `keep_alive`, default `24h`). Each ops cycle then

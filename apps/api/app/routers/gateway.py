@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
 from app import inference
+from app.config import get_settings
 from app.gwerrors import GatewayError
 from app.inference import Admitted, dbcall, get_scheduler
 from app.litellm import LiteLLMClient, get_litellm
@@ -110,9 +111,9 @@ async def _non_stream(sched: Scheduler, adm: Admitted, up: inference.Upstream, h
                                code=f"upstream_{st}", msg=raw[:500].decode(errors="replace"))
     else:
         i, o = inference.usage_from_json(data, adm.est_input)
+        finish, tools = inference.outcome_from_json(data)
         await inference.settle(sched, adm.id, adm.dep_id, status="completed", consumed=True,
-                               in_tok=i, out_tok=o,
-                               ttft_ms=None)
+                               in_tok=i, out_tok=o, ttft_ms=None, finish=finish, tools=tools)
     return JSONResponse(content=data, status_code=st, headers=headers)
 
 
@@ -202,9 +203,22 @@ def _stream_after_wait(sched, litellm, adm, body, key, request: Request, headers
                              headers={**headers, "cache-control": "no-cache", "x-accel-buffering": "no"})
 
 
+def _client_context(request: Request, body: dict, size: int) -> dict:
+    """What the request says about its caller. Never any prompt content."""
+    st = get_settings()
+    ip = None
+    if st.log_client_ip:
+        fwd = request.headers.get("x-forwarded-for", "") if st.trust_forwarded_for else ""
+        ip = (fwd.split(",")[0].strip() or None) or (request.client.host if request.client else None)
+    ua = (request.headers.get("user-agent") or "")[:200] or None
+    return {"ip": ip[:64] if ip else None, "ua": ua, "bytes": size,
+            "has_tools": bool(body.get("tools") or body.get("functions"))}
+
+
 async def _proxy(request: Request, key: KeyInfo, sched: Scheduler, litellm: LiteLLMClient):
+    raw_body = await request.body()
     try:
-        body = json.loads(await request.body())
+        body = json.loads(raw_body)
         if not isinstance(body, dict):
             raise ValueError
     except ValueError:
@@ -217,7 +231,8 @@ async def _proxy(request: Request, key: KeyInfo, sched: Scheduler, litellm: Lite
         raise GatewayError(404, "model_not_found", f"The model '{alias}' does not exist or you do "
                                                    "not have access to it.")
     idem = (request.headers.get("idempotency-key") or "")[:200] or None
-    adm = await inference.admit(sched, key_id=key.id, alias=alias, body=body, idem=idem)
+    adm = await inference.admit(sched, key_id=key.id, alias=alias, body=body, idem=idem,
+                                client=_client_context(request, body, len(raw_body)))
     try:
         headers = {"x-nexora-request-id": str(adm.id), **_route_headers(adm)}
 

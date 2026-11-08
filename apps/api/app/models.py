@@ -340,6 +340,13 @@ class InferenceRequest(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Context for activity analysis. No prompt or response content is ever stored here.
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    request_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    has_tools: Mapped[bool] = mapped_column(Boolean, default=False)  # the request offered tools/functions
+    finish_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)  # stop, length, tool_calls, ...
+    tool_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)  # tool calls the model made
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

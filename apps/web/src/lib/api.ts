@@ -17,6 +17,15 @@ export interface Project {
 export interface AuditLog {
   id: string; actor_id: string | null; action: string; entity_type: string;
   entity_id: string | null; metadata: Record<string, unknown>; created_at: string;
+  seq?: number | null; hash?: string | null;
+}
+export interface ChainStatus {
+  ok: boolean; checked: number; unsealed: number; problem: { seq: number; reason: string } | null;
+  head: { seq: number; hash: string } | null;
+}
+export interface RetentionInfo {
+  settings: { request_events_days: number; routing_decisions_days: number };
+  last_maintenance: { at: string; purged: Record<string, number>; audit_chain: ChainStatus } | null;
 }
 
 export class ApiError extends Error {

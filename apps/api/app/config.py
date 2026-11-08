@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "development"
+    # Client context on request records. IP addresses are personal data: turn off if you do not need them.
+    log_client_ip: bool = True
+    log_sink_dir: str | None = None  # directory file sinks may write into; file sinks are refused without it
+    trust_forwarded_for: bool = False  # only behind a reverse proxy you control that sets X-Forwarded-For
     app_name: str = "Nexora"
     public_app_url: str = "http://localhost:3000"
 

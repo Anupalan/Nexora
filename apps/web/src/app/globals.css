@@ -179,7 +179,7 @@ form.stack { display: grid; gap: 14px; }
 .auth-card button { width: 100%; padding: 10px; }
 
 @media (max-width: 900px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: minmax(0, 1fr); } /* 1fr alone lets wide tables stretch the whole page */
   .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px;
     border-right: 0; border-bottom: 1px solid var(--border); padding: 12px; }
   .brand { padding: 0 8px 0 0; } .nav-group { display: none; }

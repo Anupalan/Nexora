@@ -2,12 +2,13 @@ import hmac
 import uuid
 from datetime import datetime
 
+import anyio
 from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import Response
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as DBSession
 
-from app import auditchain, metrics, ops, retention
+from app import auditchain, metrics, ops, retention, sinks
 from app.audit import audit
 from app.config import get_settings
 from app.db import get_db
@@ -86,6 +87,73 @@ def run_maintenance(actor: User = Depends(require_super_admin), db: DBSession = 
     audit(db, actor, "maintenance.run", "retention", "retention", purged=str(result["purged"]))
     db.commit()
     return result
+
+
+# ---------------------------------------------------------------- log sinks
+
+def _sink_or_404(db, sink_id: str) -> dict:
+    s = next((x for x in sinks.load_sinks(db) if x["id"] == sink_id), None)
+    if s is None:
+        raise ApiError(404, "NOT_FOUND", "Log sink not found.")
+    return s
+
+
+@router.get("/log-sinks")
+def list_log_sinks(_: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    return {"directory_configured": bool(get_settings().log_sink_dir),
+            "sinks": [sinks.view(s, sinks.status_of(db, s["id"])) for s in sinks.load_sinks(db)]}
+
+
+@router.post("/log-sinks", status_code=201)
+def create_log_sink(body: dict, actor: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    """Export activity to a JSON-lines file or a (signed) webhook. Starts from now unless `backfill` is true."""
+    try:
+        s = sinks.create(db, body, actor.id)
+    except ValueError as e:
+        raise ApiError(422, "VALIDATION_ERROR", str(e))
+    audit(db, actor, "logsink.create", "log_sink", s["id"], name=s["name"], type=s["type"])
+    db.commit()
+    return sinks.view(s, sinks.status_of(db, s["id"]))
+
+
+@router.patch("/log-sinks/{sink_id}")
+def update_log_sink(sink_id: str, body: dict, actor: User = Depends(require_super_admin),
+                    db: DBSession = Depends(get_db)):
+    try:
+        s = sinks.update(db, sink_id, body, actor.id)
+    except ValueError as e:
+        raise ApiError(422, "VALIDATION_ERROR", str(e))
+    if s is None:
+        raise ApiError(404, "NOT_FOUND", "Log sink not found.")
+    audit(db, actor, "logsink.update", "log_sink", sink_id, fields=sorted(k for k in body if k != "id"))
+    db.commit()
+    return sinks.view(s, sinks.status_of(db, sink_id))
+
+
+@router.delete("/log-sinks/{sink_id}", status_code=204)
+def delete_log_sink(sink_id: str, actor: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    if not sinks.delete(db, sink_id, actor.id):
+        raise ApiError(404, "NOT_FOUND", "Log sink not found.")
+    audit(db, actor, "logsink.delete", "log_sink", sink_id)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/log-sinks/{sink_id}/test")
+async def test_log_sink(sink_id: str, _: User = Depends(require_super_admin)):
+    """Send one clearly-marked test record to check the destination."""
+    sink = await dbcall(lambda db: _sink_or_404(db, sink_id))
+    err = await anyio.to_thread.run_sync(sinks.send_test, sink)
+    return {"ok": err is None, "error": err}
+
+
+@router.post("/log-sinks/{sink_id}/export")
+async def export_log_sink(sink_id: str, _: User = Depends(require_super_admin),
+                          sched: Scheduler = Depends(get_scheduler)):
+    """Export what is new right now (this also happens every ops cycle)."""
+    sink = await dbcall(lambda db: _sink_or_404(db, sink_id))
+    await dbcall(auditchain.seal)
+    return await sinks.export_sink(sched, sink)
 
 
 @router.get("/dashboard")

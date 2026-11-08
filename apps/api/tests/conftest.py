@@ -178,6 +178,7 @@ class FakeLiteLLM:
         self.inflight = 0
         self.max_inflight = 0
         self.order: list = []  # labels (first message content) in the order calls reached upstream
+        self.choices = [{"message": {"content": "hi"}, "finish_reason": "stop"}]  # non-stream reply
         self.stream_chunks = [b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n',
                               b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
                               b"data: [DONE]\n\n"]
@@ -226,7 +227,7 @@ class FakeLiteLLM:
                 return httpx.Response(200, headers={"content-type": "text/event-stream"},
                                       stream=httpx.ByteStream(b"".join(self.stream_chunks)))
             return httpx.Response(200, json={"id": "c1", "model": body["model"],
-                                             "choices": [{"message": {"content": "hi"}}],
+                                             "choices": self.choices,
                                              "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
         return httpx.Response(404)
 

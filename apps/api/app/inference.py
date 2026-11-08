@@ -124,6 +124,12 @@ def load_context(db, key_id: uuid.UUID, alias: str) -> dict | None:
     }
 
 
+def _client_cols(ctx: dict) -> dict:
+    c = ctx.get("client") or {}
+    return {"client_ip": c.get("ip"), "user_agent": c.get("ua"), "request_bytes": c.get("bytes"),
+            "has_tools": bool(c.get("has_tools"))}
+
+
 def create_request(db, ctx: dict, *, rid: uuid.UUID, decision: router.Decision, reservation: dict,
                    stream: bool, idem: str | None, source: str) -> uuid.UUID | None:
     cand = decision.chosen
@@ -131,7 +137,7 @@ def create_request(db, ctx: dict, *, rid: uuid.UUID, decision: router.Decision, 
         id=rid, user_id=ctx["user_id"], team_id=ctx["team_id"], project_id=ctx["project_id"],
         api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cand.id),
         source=source, status="queued", stream=stream, idempotency_key=idem, workload_class=ctx["klass"],
-        reserved_tokens=reservation["tokens"], reservation=reservation)
+        reserved_tokens=reservation["tokens"], reservation=reservation, **_client_cols(ctx))
     db.add(r)
     try:
         db.flush()
@@ -152,7 +158,8 @@ def reject_unrouted(db, ctx: dict, rid: uuid.UUID, decision: router.Decision, *,
         api_key_id=ctx["key_id"], model_id=ctx["model_id"], deployment_id=uuid.UUID(cands[0].id),
         source=source, status="rejected", stream=stream, error_code=decision.error_code,
         workload_class=ctx["klass"],
-        error_message=decision.error_message, completed_at=utcnow(), reserved_tokens=0, reservation={})
+        error_message=decision.error_message, completed_at=utcnow(), reserved_tokens=0, reservation={},
+        **_client_cols(ctx))
     db.add(r)
     db.flush()
     db.add(RequestEvent(request_id=r.id, event_type="rejected", event_data={"code": decision.error_code}))
@@ -192,7 +199,8 @@ def mark_running(db, rid: uuid.UUID) -> int:
 
 
 def finalize(db, rid: uuid.UUID, *, status: str, consumed: bool, in_tok: int = 0, out_tok: int = 0,
-             ttft_ms: int | None = None, code: str | None = None, msg: str | None = None) -> dict | None:
+             ttft_ms: int | None = None, code: str | None = None, msg: str | None = None,
+             finish: str | None = None, tools: int | None = None) -> dict | None:
     """Move a queued/running request to a terminal state exactly once. None if already final."""
     from app.models import as_utc
 
@@ -204,6 +212,10 @@ def finalize(db, rid: uuid.UUID, *, status: str, consumed: bool, in_tok: int = 0
             "reserved": r.reserved_tokens}
     r.status, r.completed_at = status, now
     r.error_code, r.error_message = code, (msg[:1000] if msg else None)
+    if finish:
+        r.finish_reason = finish[:30]
+    if tools is not None:
+        r.tool_calls = tools
     if consumed:
         r.input_tokens, r.output_tokens, r.time_to_first_token_ms = in_tok, out_tok, ttft_ms
         if r.started_at:
@@ -245,12 +257,13 @@ def _estimate_input(body: dict) -> int:
 
 
 async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, idem: str | None,
-                source: str = "api") -> Admitted:
+                source: str = "api", client: dict | None = None) -> Admitted:
     st = get_settings()
     ctx = await dbcall(load_context, key_id, alias)
     if ctx is None:
         raise GatewayError(404, "model_not_found", f"The model '{alias}' does not exist or you do "
                                                    "not have access to it.")
+    ctx["client"] = client or {}
     if idem:
         prior = await dbcall(existing_by_idem, ctx["user_id"], idem)
         if prior:
@@ -331,10 +344,11 @@ async def admit(sched: Scheduler, *, key_id: uuid.UUID, alias: str, body: dict, 
 
 async def settle(sched: Scheduler, adm_id: uuid.UUID, dep_id: uuid.UUID, *, status: str, consumed: bool,
                  in_tok: int = 0, out_tok: int = 0, ttft_ms: int | None = None,
-                 code: str | None = None, msg: str | None = None) -> None:
+                 code: str | None = None, msg: str | None = None, finish: str | None = None,
+                 tools: int | None = None) -> None:
     with anyio.CancelScope(shield=True):  # must finish even if the client went away
         snap = await dbcall(finalize, adm_id, status=status, consumed=consumed, in_tok=in_tok,
-                            out_tok=out_tok, ttft_ms=ttft_ms, code=code, msg=msg)
+                            out_tok=out_tok, ttft_ms=ttft_ms, code=code, msg=msg, finish=finish, tools=tools)
         if snap is None:
             return
         res = snap["reservation"]
@@ -494,6 +508,15 @@ def usage_from_json(data: Any, est_in: int) -> tuple[int, int]:
     return est_in, max(1, len(text) // 4)
 
 
+def outcome_from_json(data: Any) -> tuple[str | None, int]:
+    """(finish_reason, number of tool calls) from a non-streaming chat completion."""
+    finish, tools = None, 0
+    for ch in (data.get("choices") or []) if isinstance(data, dict) else []:
+        finish = finish or ch.get("finish_reason")
+        tools += len((ch.get("message") or {}).get("tool_calls") or [])
+    return (finish if isinstance(finish, str) else None), tools
+
+
 class SSEUsage:
     """Incrementally scans an SSE byte stream for a usage block, without altering the bytes."""
 
@@ -501,6 +524,8 @@ class SSEUsage:
         self.buf = b""
         self.usage: tuple[int, int] | None = None
         self.chars = 0
+        self.finish: str | None = None
+        self.tool_idx: set[tuple[int, int]] = set()  # (choice, tool_call index) seen in deltas
 
     def feed(self, chunk: bytes) -> None:
         self.buf += chunk
@@ -519,8 +544,13 @@ class SSEUsage:
             if isinstance(obj, dict):
                 if isinstance(obj.get("usage"), dict):
                     self.usage = usage_from_json(obj, 0)
-                for ch in obj.get("choices") or []:
-                    self.chars += len((ch.get("delta") or {}).get("content") or ch.get("text") or "")
+                for n, ch in enumerate(obj.get("choices") or []):
+                    delta = ch.get("delta") or {}
+                    self.chars += len(delta.get("content") or ch.get("text") or "")
+                    if isinstance(ch.get("finish_reason"), str):
+                        self.finish = ch["finish_reason"]
+                    for i, tc in enumerate(delta.get("tool_calls") or []):
+                        self.tool_idx.add((n, tc.get("index", i) if isinstance(tc, dict) else i))
 
 
 async def stream_through(sched: Scheduler, adm: Admitted, up: Upstream,
@@ -547,7 +577,8 @@ async def stream_through(sched: Scheduler, adm: Admitted, up: Upstream,
         in_tok, out_tok = sse.usage or (adm.est_input, max(1, sse.chars // 4) if sse.chars else 0)
         with anyio.CancelScope(shield=True):
             await settle(sched, adm.id, adm.dep_id, status=status, consumed=True, in_tok=in_tok,
-                         out_tok=out_tok, ttft_ms=ttft, code=code, msg=msg)
+                         out_tok=out_tok, ttft_ms=ttft, code=code, msg=msg, finish=sse.finish,
+                         tools=len(sse.tool_idx))
             await up.close()
 
 
