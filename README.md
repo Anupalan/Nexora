@@ -1,0 +1,35 @@
+# Nexora
+
+**One Platform. Every Intelligence.** Unified access to AI models, coding agents and intelligent
+workflows — Model Gateway · AI Workspace · Agent Orchestration · Usage Intelligence.
+
+Full spec and phased plan: [roadmap.md](roadmap.md). Current status: **Phase 1 (foundation and identity)**.
+
+## Layout
+- `apps/api` — FastAPI management API (auth, RBAC, users, teams, projects, audit), Alembic migrations
+- `apps/web` — Next.js portal shell
+- `infra/compose` — local Postgres + Redis
+
+## Run locally
+```bash
+# 1. dependencies (or use your own Postgres/Redis)
+docker compose -f infra/compose/docker-compose.dev.yml up -d
+
+# 2. API
+cd apps/api && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+export DATABASE_URL=postgresql+psycopg://nexora:nexora@localhost:5432/nexora COOKIE_SECURE=false
+.venv/bin/alembic upgrade head
+NEXORA_ADMIN_PASSWORD='change-me-please-12' .venv/bin/python -m app.cli create-admin --email you@company.com
+.venv/bin/uvicorn app.main:app --port 8001 --reload
+
+# 3. Web (proxies /api/v1 to the API)
+cd apps/web && pnpm install && pnpm dev
+```
+Tests: `cd apps/api && .venv/bin/pytest` (SQLite, no services needed).
+
+## Phase 1 status
+Done: users/roles, login/logout/refresh, server-side sessions with revocation, CSRF double-submit,
+login lockout, teams, projects, project roles, backend authorization, append-only audit log, portal shell.
+
+Deferred (needs email/OIDC infra, tracked for a later phase): password reset & account activation
+emails, MFA for admins, OIDC/SSO, per-IP login rate limiting at the ingress.
