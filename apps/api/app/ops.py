@@ -22,6 +22,7 @@ from app.models import (
     InferenceRequest,
     Model,
     ModelDeployment,
+    PlatformSetting,
     Quota,
     User,
     as_utc,
@@ -109,6 +110,7 @@ class OpsInputs:
     quotas: list[QuotaUse] = field(default_factory=list)
     digest_mismatches: list[tuple[str, list[str]]] = field(default_factory=list)  # (model, digests)
     version_skew: list[str] = field(default_factory=list)  # distinct Ollama versions when they differ
+    audit_chain_problem: str | None = None  # from the last daily verification
 
 
 Desired = dict[str, tuple[str, str, str, dict]]  # dedupe_key -> (type, severity, message, details)
@@ -143,6 +145,10 @@ def evaluate_rules(inp: OpsInputs) -> Desired:
         want["auth_failures"] = ("repeated_auth_failures", "warning",
                                  f"{inp.auth_failures_10m} failed sign-ins in the last 10 minutes.",
                                  {"count": inp.auth_failures_10m})
+    if inp.audit_chain_problem:
+        want["audit_chain"] = ("audit_chain_broken", "critical",
+                               f"The audit log failed verification: {inp.audit_chain_problem}.",
+                               {"problem": inp.audit_chain_problem})
     for model, digests in inp.digest_mismatches:
         want[f"digest_mismatch:{model}"] = (
             "deployment_digest_mismatch", "warning",
@@ -216,14 +222,18 @@ def _db_inputs(db: DBSession):
     quotas = list(db.scalars(select(Quota)))
     for q in quotas:
         db.expunge(q)
+    from app import retention
+    status = db.get(PlatformSetting, retention.STATUS_KEY)
+    chain = ((status.value or {}).get("audit_chain") or {}) if status else {}
+    chain_problem = None if chain.get("ok", True) else (chain.get("problem") or {}).get("reason", "unknown")
     return (deps, (int(sum(waits) / len(waits)) if waits else None), len(waits), fails, quotas,
-            mismatches, [v for v in versions if v])
+            mismatches, [v for v in versions if v], chain_problem)
 
 
 async def gather_inputs(sched: Scheduler) -> OpsInputs:
-    deps, avg_wait, n_started, fails, quotas, mismatches, versions = await dbcall(_db_inputs)
+    deps, avg_wait, n_started, fails, quotas, mismatches, versions, chain_problem = await dbcall(_db_inputs)
     inp = OpsInputs(avg_queue_wait_ms_5m=avg_wait, started_5m=n_started, auth_failures_10m=fails,
-                    digest_mismatches=mismatches, version_skew=versions)
+                    digest_mismatches=mismatches, version_skew=versions, audit_chain_problem=chain_problem)
     for dep_id, alias, health, max_q, max_a, dep_name, node, wfail, wdetail in deps:
         inp.deployments.append(DeploymentState(str(dep_id), alias, health, await sched.depth(dep_id),
                                                await sched.active_count(dep_id), max_q, max_a,
@@ -252,11 +262,15 @@ async def ops_cycle(sched: Scheduler, litellm: LiteLLMClient) -> dict:
 
     from app import warmup
 
+    from app import auditchain, retention
+
+    await dbcall(auditchain.seal)  # chain any new audit rows
+    maint = await dbcall(retention.maintenance)  # daily: purge old detail rows, verify the audit chain
     health = await check_deployments(litellm)
     warm = await warmup.warm_cycle()  # keep opted-in models resident (after health, before alerts)
     rebalance = await rebalance_queued(sched)  # evacuate queues of unhealthy/draining deployments
     alerts = await run_alert_cycle(sched)
-    return {"health": health, "warm": warm, "rebalance": rebalance, "alerts": alerts}
+    return {"health": health, "maintenance": maint, "warm": warm, "rebalance": rebalance, "alerts": alerts}
 
 
 # ---------------------------------------------------------------- dashboard

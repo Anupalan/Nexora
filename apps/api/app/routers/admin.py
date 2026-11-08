@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as DBSession
 
-from app import metrics, ops
+from app import auditchain, metrics, ops, retention
 from app.audit import audit
 from app.config import get_settings
 from app.db import get_db
@@ -46,8 +46,46 @@ def audit_logs(action: str | None = None, actor_id: str | None = None, entity_ty
         like = f"%{q.replace('%', '').replace('_', ' ')}%"
         stmt = stmt.where(or_(AuditLog.action.ilike(like), AuditLog.entity_id.ilike(like)))
     return [AuditOut(id=a.id, actor_id=a.actor_id, action=a.action, entity_type=a.entity_type,
-                     entity_id=a.entity_id, metadata=a.meta, created_at=a.created_at)
+                     entity_id=a.entity_id, metadata=a.meta, created_at=a.created_at,
+                     seq=a.seq, hash=a.hash)
             for a in db.scalars(stmt)]
+
+
+@router.get("/audit-logs/verify")
+def verify_audit_chain(anchor_seq: int | None = Query(None, ge=1), anchor_hash: str | None = Query(None, max_length=64),
+                       _: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    """Check the audit log's hash chain end to end. To also catch deletion of the newest entries, pass an
+    earlier head (`seq` and `hash`, as returned here) that you stored outside the database."""
+    auditchain.seal(db)
+    return auditchain.verify(db, anchor_seq, anchor_hash)
+
+
+@router.get("/retention")
+def get_retention(_: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    from app.models import PlatformSetting
+
+    status = db.get(PlatformSetting, retention.STATUS_KEY)
+    return {"settings": retention.load(db), "last_maintenance": status.value if status else None}
+
+
+@router.put("/retention")
+def put_retention(body: dict, actor: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    try:
+        values = retention.save(db, body, actor.id)
+    except (ValueError, TypeError) as e:
+        raise ApiError(422, "VALIDATION_ERROR", str(e))
+    audit(db, actor, "retention.update", "retention", "retention", **values)
+    db.commit()
+    return {"settings": values}
+
+
+@router.post("/maintenance/run")
+def run_maintenance(actor: User = Depends(require_super_admin), db: DBSession = Depends(get_db)):
+    """Purge detail rows past retention and verify the audit chain now (it also runs daily)."""
+    result = retention.maintenance(db, force=True)
+    audit(db, actor, "maintenance.run", "retention", "retention", purged=str(result["purged"]))
+    db.commit()
+    return result
 
 
 @router.get("/dashboard")

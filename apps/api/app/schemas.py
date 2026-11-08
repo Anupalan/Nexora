@@ -125,6 +125,8 @@ class AuditOut(BaseModel):
     entity_id: str | None
     metadata: dict
     created_at: datetime
+    seq: int | None = None
+    hash: str | None = None
 
 
 # ---- models & keys -------------------------------------------------------------------

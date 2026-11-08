@@ -108,6 +108,20 @@ Back up secrets separately, encrypted, with restricted recovery access.
 - **Failover is conservative on purpose:** it needs a connection-style error *and* a probe showing the node
   down. Any other failure is returned to the client rather than replayed.
 
+## Audit integrity and retention
+- **Hash-chained audit log.** Every audit row is chained to the one before it (SHA-256 over the row plus the previous
+  hash) a few seconds after it is written. `GET /admin/audit-logs/verify` walks the whole chain and reports the first
+  altered or missing entry. A daily check also runs and raises an `audit_chain_broken` alert. The database already
+  refuses UPDATE and DELETE on audit rows; the chain additionally exposes tampering by anyone with raw database access.
+- **Anchor the head.** Deleting the newest rows leaves no later entry to disagree, so record the chain head (`head.seq`
+  and `head.hash` from the verify response) somewhere outside the database now and then (monitoring, a ticket). Pass
+  it back as `?anchor_seq=...&anchor_hash=...` to prove nothing at or before it was removed.
+- **Retention.** `GET/PUT /admin/retention` sets how many days to keep per-request lifecycle events and routing
+  decisions (default 90 each; 0 keeps forever). The daily maintenance (`POST /admin/maintenance/run` to run it now)
+  purges them in batches. Request headers, usage records and the audit log are never purged because quotas, usage
+  reports and the audit trail depend on them. Prompt and response content is not stored unless content logging is
+  turned on, and that is off by default.
+
 ## Keeping models warm
 - A cold load costs seconds (about 5-6 s for the 8B model). Turn on *Keep warm* for a deployment (Routing page, or
   `PATCH /admin/deployments/{id}` with `keep_warm: true` and optionally `keep_alive`, default `24h`). Each ops cycle then

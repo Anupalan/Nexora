@@ -148,6 +148,10 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     meta: Mapped[dict] = mapped_column("metadata", JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Hash chain (see app.auditchain): filled in by the sealer shortly after the row is written.
+    seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True, unique=True)
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Model(Base):
