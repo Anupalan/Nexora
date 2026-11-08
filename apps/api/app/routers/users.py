@@ -9,8 +9,10 @@ from app.audit import audit
 from app.authz import admin_team_ids, is_super
 from app.db import get_db
 from app.deps import ApiError, current_user, require_super_admin
+from app.litellm import LiteLLMClient, get_litellm
 from app.models import Role, TeamMember, User
 from app.routers.auth import revoke_user_sessions, user_out
+from app.routers.keys import revoke_user_keys
 from app.schemas import UserCreate, UserOut, UserUpdate
 from app.security import hash_password
 
@@ -92,7 +94,8 @@ def update_user(user_id: uuid.UUID, body: UserUpdate, actor: User = Depends(requ
     return user_out(target)
 
 
-def _set_status(user_id: uuid.UUID, status: str, actor: User, db: DBSession) -> UserOut:
+def _set_status(user_id: uuid.UUID, status: str, actor: User, db: DBSession,
+                litellm: LiteLLMClient) -> UserOut:
     target = db.get(User, user_id)
     if target is None:
         raise ApiError(404, "NOT_FOUND", "User not found.")
@@ -101,6 +104,7 @@ def _set_status(user_id: uuid.UUID, status: str, actor: User, db: DBSession) -> 
     target.status = status
     if status != "active":
         revoke_user_sessions(db, target.id)  # takes effect immediately
+        revoke_user_keys(db, target.id, litellm)
     else:
         target.failed_logins, target.locked_until = 0, None
     audit(db, actor, "user.suspend" if status != "active" else "user.activate", "user", target.id)
@@ -110,11 +114,11 @@ def _set_status(user_id: uuid.UUID, status: str, actor: User, db: DBSession) -> 
 
 @router.post("/{user_id}/suspend", response_model=UserOut)
 def suspend(user_id: uuid.UUID, actor: User = Depends(require_super_admin),
-            db: DBSession = Depends(get_db)):
-    return _set_status(user_id, "suspended", actor, db)
+            db: DBSession = Depends(get_db), litellm: LiteLLMClient = Depends(get_litellm)):
+    return _set_status(user_id, "suspended", actor, db, litellm)
 
 
 @router.post("/{user_id}/activate", response_model=UserOut)
 def activate(user_id: uuid.UUID, actor: User = Depends(require_super_admin),
-             db: DBSession = Depends(get_db)):
-    return _set_status(user_id, "active", actor, db)
+             db: DBSession = Depends(get_db), litellm: LiteLLMClient = Depends(get_litellm)):
+    return _set_status(user_id, "active", actor, db, litellm)

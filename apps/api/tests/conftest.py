@@ -88,3 +88,53 @@ def world(app_):
     proj_b = root.post("/projects", {"team_id": team_b["id"], "name": "pb"}).json()
     return dict(root=root, team_a=team_a, team_b=team_b, proj_a=proj_a, proj_b=proj_b,
                 dev_a=dev_a, dev_b=dev_b, outsider=outsider, ta_id=ta_id, app=app_)
+
+
+# ---- fake LiteLLM ---------------------------------------------------------------------
+import json  # noqa: E402
+
+import httpx  # noqa: E402
+
+from app.litellm import LiteLLMClient, get_litellm  # noqa: E402
+
+MASTER = "sk-master-secret"
+
+
+class FakeLiteLLM:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.down = False
+        self.stream_chunks = [b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n',
+                              b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+                              b"data: [DONE]\n\n"]
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        if self.down:
+            raise httpx.ConnectError("down")
+        body = json.loads(req.content) if req.content else {}
+        self.calls.append({"path": req.url.path, "auth": req.headers.get("authorization"), "body": body})
+        if req.url.path == "/key/generate":
+            return httpx.Response(200, json={"key": body["key"], "token": "hash-" + body["key"][-8:]})
+        if req.url.path in ("/key/update", "/key/delete"):
+            return httpx.Response(200, json={})
+        if req.url.path.endswith("/completions"):
+            if body.get("stream"):
+                # A real stream (not pre-read content) so the proxy's streaming path is exercised.
+                return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                      stream=httpx.ByteStream(b"".join(self.stream_chunks)))
+            return httpx.Response(200, json={"id": "c1", "model": body["model"],
+                                             "choices": [{"message": {"content": "hi"}}],
+                                             "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+        return httpx.Response(404)
+
+    def paths(self):
+        return [c["path"] for c in self.calls]
+
+
+@pytest.fixture
+def llm(app_):
+    fake = FakeLiteLLM()
+    client = LiteLLMClient("http://litellm", MASTER, 30, transport=httpx.MockTransport(fake.handler))
+    app_.dependency_overrides[get_litellm] = lambda: client
+    yield fake
+    app_.dependency_overrides.pop(get_litellm, None)

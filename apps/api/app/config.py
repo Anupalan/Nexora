@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     max_failed_logins: int = 5
     lockout_minutes: int = 15
 
+    # LiteLLM gateway (private network). The master key is server-side only.
+    litellm_base_url: str = "http://localhost:4000"
+    litellm_master_key: str = ""
+    gateway_timeout_seconds: float = 600.0
+    key_prefix: str = "sk-nx-"
+
     cors_origins: list[str] = ["http://localhost:3000"]
 
 

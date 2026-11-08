@@ -1,9 +1,9 @@
-"""Phase 1 schema: identity, organisation, sessions, audit (roadmap §10.1, §10.6)."""
+"""Schema: identity, organisation, sessions, audit, models and API keys (roadmap §10)."""
 
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -137,3 +137,59 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     meta: Mapped[dict] = mapped_column("metadata", JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Model(Base):
+    """A stable model alias exposed to developers (roadmap §5.4)."""
+
+    __tablename__ = "models"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(200))  # display name
+    model_alias: Mapped[str] = mapped_column(String(100), unique=True)  # what clients send
+    litellm_model: Mapped[str] = mapped_column(String(200))  # model name configured in LiteLLM
+    provider: Mapped[str] = mapped_column(String(50), default="vllm")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    configuration: Mapped[dict] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelDeployment(Base):
+    __tablename__ = "model_deployments"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id", ondelete="RESTRICT"), index=True)
+    deployment_name: Mapped[str] = mapped_column(String(200))
+    endpoint_reference: Mapped[str] = mapped_column(String(200))  # secret/config reference, no creds
+    health_status: Mapped[str] = mapped_column(String(20), default="unknown")
+    configuration: Mapped[dict] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApiKey(Base):
+    """Metadata for a LiteLLM virtual key. The plaintext is never stored (roadmap §5.3)."""
+
+    __tablename__ = "api_keys"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    litellm_key_id: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True)  # SHA-256 of plaintext
+    key_prefix: Mapped[str] = mapped_column(String(16))  # e.g. "sk-nx-ab12…" for display
+    name: Mapped[str] = mapped_column(String(200))
+    allowed_models: Mapped[list] = mapped_column(JSONType, default=list)  # model aliases
+    rpm_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tpm_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active|revoked
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(lazy="joined")

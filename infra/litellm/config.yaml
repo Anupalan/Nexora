@@ -1,0 +1,12 @@
+# LiteLLM proxy config (example). Model aliases registered in Nexora map to `model_name` here
+# via the model's "LiteLLM model" field. Pin the LiteLLM version and validate in Phase 0.
+model_list:
+  - model_name: qwen-coder
+    litellm_params:
+      model: openai/qwen-coder            # vLLM's OpenAI-compatible server
+      api_base: http://DGX_SPARK_PRIVATE_IP:8000/v1
+      api_key: os.environ/VLLM_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # server-side only; never given to developers
+  database_url: os.environ/LITELLM_DATABASE_URL

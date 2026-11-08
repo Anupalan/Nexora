@@ -130,3 +130,72 @@ class AuditOut(BaseModel):
     entity_id: str | None
     metadata: dict
     created_at: datetime
+
+
+# ---- models & keys -------------------------------------------------------------------
+class ModelOut(ORM):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+    id: uuid.UUID
+    name: str
+    model_alias: str
+    provider: str
+    description: str | None
+    context_limit: int | None
+    max_output_tokens: int | None
+    enabled: bool
+
+
+class ModelCreate(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    name: str = Field(min_length=1, max_length=200)
+    model_alias: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
+    litellm_model: str = Field(min_length=1, max_length=200)
+    provider: str = Field(default="vllm", max_length=50)
+    description: str | None = None
+    context_limit: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
+
+class ModelUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    litellm_model: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    context_limit: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
+
+class KeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    project_id: uuid.UUID | None = None
+    models: list[str] | None = None  # default: every enabled model
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    rpm_limit: int | None = Field(default=None, ge=1)
+    tpm_limit: int | None = Field(default=None, ge=1)
+
+
+class KeyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    models: list[str] | None = None
+    rpm_limit: int | None = Field(default=None, ge=1)
+    tpm_limit: int | None = Field(default=None, ge=1)
+
+
+class KeyOut(ORM):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    team_id: uuid.UUID | None
+    project_id: uuid.UUID | None
+    name: str
+    key_prefix: str
+    allowed_models: list[str]
+    rpm_limit: int | None
+    tpm_limit: int | None
+    expires_at: datetime | None
+    status: str
+    last_used_at: datetime | None
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class KeyCreated(KeyOut):
+    key: str  # plaintext, shown exactly once

@@ -16,6 +16,8 @@ function Shell({ children }: { children: ReactNode }) {
     ["/dashboard", "Dashboard"],
     ["/projects", "Projects"],
     ["/teams", "Teams"],
+    ["/keys", "API Keys"],
+    ["/models", "Models"],
     ...(lead ? ([["/users", "Developers"]] as [string, string][]) : []),
     ...(admin ? ([["/audit", "Audit Logs"]] as [string, string][]) : []),
   ];

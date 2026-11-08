@@ -50,3 +50,14 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
   }
   return body as T;
 }
+
+export interface ModelInfo {
+  id: string; name: string; model_alias: string; provider: string; description: string | null;
+  context_limit: number | null; max_output_tokens: number | null; enabled: boolean;
+}
+export interface ApiKeyInfo {
+  id: string; name: string; key_prefix: string; allowed_models: string[]; project_id: string | null;
+  rpm_limit: number | null; tpm_limit: number | null; expires_at: string | null; status: string;
+  last_used_at: string | null; created_at: string;
+}
+export interface ApiKeyCreated extends ApiKeyInfo { key: string }

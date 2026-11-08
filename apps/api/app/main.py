@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import get_engine
-from app.routers import admin, auth, projects, teams, users
+from app.routers import admin, auth, gateway, keys, models, projects, teams, users
 
 settings = get_settings()
 app = FastAPI(title=f"{settings.app_name} API", version="0.1.0")
@@ -43,6 +43,8 @@ def _envelope(request: Request, status: int, code: str, message: str, details=No
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException):
     d = exc.detail
+    if isinstance(d, dict) and "openai" in d:  # OpenAI-shaped errors on /v1
+        return JSONResponse(status_code=exc.status_code, content={"error": d["openai"]})
     if isinstance(d, dict) and "code" in d:
         return _envelope(request, exc.status_code, d["code"], d["message"], d.get("details"))
     return _envelope(request, exc.status_code, f"HTTP_{exc.status_code}", str(d))
@@ -55,8 +57,10 @@ async def validation_error(request: Request, exc: RequestValidationError):
                      {"errors": errs})
 
 
-for r in (auth.router, users.router, teams.router, projects.router, admin.router):
+for r in (auth.router, users.router, teams.router, projects.router, admin.router,
+          keys.router, models.router):
     app.include_router(r, prefix="/api/v1")
+app.include_router(gateway.router)
 
 
 @app.get("/health/live", tags=["health"])
