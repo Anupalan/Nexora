@@ -2,9 +2,15 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { api } from "@/lib/api";
 import { SessionGate, useUser } from "@/lib/session";
+import {
+  IconChart, IconCpu, IconDashboard, IconFolder, IconGauge, IconKey, IconLogo, IconLogout,
+  IconQueue, IconShield, IconTeam, IconUsers,
+} from "@/components/icons";
+
+type Item = [href: string, label: string, Icon: ComponentType<{ size?: number }>];
 
 function Shell({ children }: { children: ReactNode }) {
   const user = useUser();
@@ -12,17 +18,25 @@ function Shell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const admin = user.role === "super_admin";
   const lead = admin || user.role === "team_admin";
-  const links: [string, string][] = [
-    ["/dashboard", "Dashboard"],
-    ["/projects", "Projects"],
-    ["/teams", "Teams"],
-    ["/keys", "API Keys"],
-    ["/models", "Models"],
-    ["/usage", "Usage"],
-    ["/queue", "Request Queue"],
-    ...(lead ? ([["/users", "Developers"]] as [string, string][]) : []),
-    ...(admin ? ([["/quotas", "Quota Policies"], ["/audit", "Audit Logs"]] as [string, string][]) : []),
+  const groups: [string, Item[]][] = [
+    ["Overview", [["/dashboard", "Dashboard", IconDashboard]]],
+    ["Build", [
+      ["/keys", "API Keys", IconKey],
+      ["/models", "Models", IconCpu],
+      ["/usage", "Usage", IconChart],
+      ["/queue", "Request Queue", IconQueue],
+    ]],
+    ["Organisation", [
+      ["/projects", "Projects", IconFolder],
+      ["/teams", "Teams", IconTeam],
+      ...(lead ? ([["/users", "Developers", IconUsers]] as Item[]) : []),
+    ]],
+    ...(admin ? ([["Administration", [
+      ["/quotas", "Quota Policies", IconGauge],
+      ["/audit", "Audit Logs", IconShield],
+    ]]] as [string, Item[]][]) : []),
   ];
+  const initials = user.name.split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
   async function logout() {
     await api("/auth/logout", { method: "POST" }).catch(() => {});
     router.replace("/login");
@@ -30,15 +44,35 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand">Nexora<small>One Platform. Every Intelligence.</small></div>
-        <nav>
-          {links.map(([href, label]) => (
-            <Link key={href} href={href} className={path.startsWith(href) ? "active" : ""}>{label}</Link>
+        <div className="brand">
+          <div className="logo"><IconLogo size={20} /></div>
+          <div><b>Nexora</b><small>One Platform. Every Intelligence.</small></div>
+        </div>
+        <nav aria-label="Main">
+          {groups.map(([group, items]) => (
+            <div key={group}>
+              <div className="nav-group">{group}</div>
+              {items.map(([href, label, Icon]) => (
+                <Link key={href} href={href} className={path.startsWith(href) ? "active" : ""}
+                  aria-current={path.startsWith(href) ? "page" : undefined}>
+                  <Icon /><span>{label}</span>
+                </Link>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="who">
-          {user.name}<br />{user.email}<br /><span className="badge">{user.role}</span>
-          <p><button className="ghost" onClick={logout}>Sign out</button></p>
+          <div className="who-row">
+            <div className="avatar" aria-hidden="true">{initials}</div>
+            <div style={{ minWidth: 0 }}>
+              <div className="who-name">{user.name}</div>
+              <div className="who-mail">{user.email}</div>
+            </div>
+          </div>
+          <span className="badge plain" style={{ justifySelf: "start" }}>{user.role.replace("_", " ")}</span>
+          <button className="ghost sm" onClick={logout} style={{ display: "inline-flex", gap: 6, justifyContent: "center", alignItems: "center" }}>
+            <IconLogout size={15} /> Sign out
+          </button>
         </div>
       </aside>
       <main className="main">{children}</main>

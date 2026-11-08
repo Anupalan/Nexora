@@ -1,0 +1,12 @@
+# Local development: real LiteLLM proxy in front of infra/mock-llm acting as the vLLM backend.
+# Registered Nexora models use `model_name` below as their "LiteLLM model".
+model_list:
+  - model_name: qwen-coder
+    litellm_params:
+      model: openai/qwen-coder
+      api_base: http://127.0.0.1:4000/v1
+      api_key: not-needed
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/LITELLM_DATABASE_URL

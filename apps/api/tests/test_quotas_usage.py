@@ -122,6 +122,11 @@ def test_usage_history_export_and_scoping(gw):  # noqa: F811
     assert (me["requests"], me["input_tokens"], me["output_tokens"], me["total_tokens"]) == (2, 6, 2, 8)
     hist = dev.get("/usage/requests").json()
     assert len(hist) == 2 and {h["status"] for h in hist} == {"completed"} and hist[0]["model"] == "coder"
+    # "mine" narrows an admin's view to their own requests (the portal's Usage page uses it)
+    assert len(root.get("/usage/requests").json()) == 3
+    assert root.get("/usage/requests?mine=true").json() == []
+    assert len(root.get("/usage/export").text.splitlines()) == 4
+    assert len(root.get("/usage/export?mine=true").text.splitlines()) == 1  # header only
     csv_text = dev.get("/usage/export").text
     assert csv_text.splitlines()[0].startswith("id,created_at,model") and len(csv_text.splitlines()) == 3
 

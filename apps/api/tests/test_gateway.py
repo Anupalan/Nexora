@@ -51,7 +51,7 @@ def test_key_secret_shown_once_and_never_stored(gw):
         assert secret not in str([a.meta for a in db.scalars(select(AuditLog))])
     # LiteLLM got the master key for management, and the right policy
     gen = next(c for c in gw["llm"].calls if c["path"] == "/key/generate")
-    assert gen["auth"] == f"Bearer {MASTER}" and gen["body"]["models"] == ["chat", "coder"]
+    assert gen["auth"] == f"Bearer {MASTER}" and gen["body"]["models"] == ["openai/qwen-chat", "openai/qwen-coder"]  # LiteLLM names, not aliases
     assert MASTER not in dev.get("/keys").text
 
 
@@ -181,7 +181,7 @@ def test_update_policy_syncs_to_litellm(gw):
     r = dev.patch(f"/keys/{k['id']}", {"models": ["chat"], "rpm_limit": 10})
     assert r.status_code == 200 and r.json()["allowed_models"] == ["chat"]
     upd = next(c for c in gw["llm"].calls if c["path"] == "/key/update")
-    assert upd["body"]["models"] == ["chat"] and upd["body"]["rpm_limit"] == 10
+    assert upd["body"]["models"] == ["openai/qwen-chat"] and upd["body"]["rpm_limit"] == 10
 
 
 def test_gateway_down_creates_nothing(gw):
@@ -198,3 +198,16 @@ def test_upstream_down_returns_openai_error(gw):
     r = Api(gw["app"]).c.post("/v1/chat/completions", headers=bearer(k["key"]),
                               json={"model": "coder", "messages": []})
     assert r.status_code == 502 and r.json()["error"]["code"] == "upstream_unavailable"
+
+
+def test_same_key_name_twice_and_rotation_use_unique_litellm_aliases(gw):
+    """Real LiteLLM rejects duplicate key aliases (found by running against the real proxy)."""
+    dev = Api(gw["app"], "deva@x.io")
+    k1, k2 = mk_key(dev, name="laptop"), mk_key(dev, name="laptop")  # same name twice is fine
+    assert k1["id"] != k2["id"]
+    rotated = dev.post(f"/keys/{k1['id']}/rotate")
+    assert rotated.status_code == 200, rotated.text
+    aliases = [c["body"]["key_alias"] for c in gw["llm"].calls_to("/key/generate")]
+    assert len(aliases) == len(set(aliases)) == 3
+    # old secret is dead at LiteLLM itself, not only blocked by Nexora
+    assert gw["llm"].keys.get(k1["key"]) is None and rotated.json()["key"] in gw["llm"].keys

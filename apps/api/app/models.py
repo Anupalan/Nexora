@@ -157,7 +157,7 @@ class Model(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     name: Mapped[str] = mapped_column(String(200))  # display name
     model_alias: Mapped[str] = mapped_column(String(100), unique=True)  # what clients send
-    litellm_model: Mapped[str] = mapped_column(String(200))  # model name configured in LiteLLM
+    litellm_model: Mapped[str] = mapped_column(String(200))  # LiteLLM `model_name`
     provider: Mapped[str] = mapped_column(String(50), default="vllm")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     context_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)

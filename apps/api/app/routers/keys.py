@@ -34,6 +34,14 @@ def _validate_models(db: DBSession, requested: list[str] | None) -> list[str]:
     return sorted(set(requested))
 
 
+def _litellm_names(db: DBSession, aliases: list[str]) -> list[str]:
+    """LiteLLM checks a key's model list against the model name in each request, which Nexora
+    rewrites from alias to the LiteLLM model name. Keys must therefore be created with those names."""
+    rows = dict(db.execute(select(Model.model_alias, Model.litellm_model)
+                           .where(Model.model_alias.in_(aliases))).all())
+    return sorted({rows[a] for a in aliases if a in rows})
+
+
 def _visible_key(db: DBSession, actor: User, key_id: uuid.UUID) -> ApiKey:
     k = db.get(ApiKey, key_id)
     can_see = k is not None and (
@@ -85,13 +93,15 @@ def create_key(body: KeyCreate, actor: User = Depends(current_user), db: DBSessi
         team_id = project.team_id
     models = _validate_models(db, body.models)
     secret = _new_secret()
+    row_id = uuid.uuid4()
     expires = utcnow() + timedelta(days=body.expires_in_days)
     key_id = litellm.generate_key(
-        key=secret, alias=f"{actor.email}:{body.name}", models=models,
+        # LiteLLM requires unique key aliases across all keys, so suffix with the key's own id.
+        key=secret, alias=f"{actor.email}:{body.name}:{row_id.hex[:8]}", models=_litellm_names(db, models),
         duration=f"{body.expires_in_days}d", rpm=body.rpm_limit, tpm=body.tpm_limit,
         metadata={"nexora_user_id": str(actor.id), "nexora_project_id": str(body.project_id or "")},
     )
-    row = ApiKey(user_id=actor.id, team_id=team_id, project_id=body.project_id,
+    row = ApiKey(id=row_id, user_id=actor.id, team_id=team_id, project_id=body.project_id,
                  litellm_key_id=key_id or None, key_hash=hash_token(secret),
                  key_prefix=_prefix(secret), name=body.name, allowed_models=models,
                  rpm_limit=body.rpm_limit, tpm_limit=body.tpm_limit, expires_at=expires)
@@ -128,7 +138,8 @@ def update_key(key_id: uuid.UUID, body: KeyUpdate, actor: User = Depends(current
     if "models" in changes:
         changes["models"] = _validate_models(db, changes["models"])
     if k.litellm_key_id:
-        litellm.update_key(k.litellm_key_id, models=changes.get("models"),
+        litellm.update_key(k.litellm_key_id,
+                           models=_litellm_names(db, changes["models"]) if "models" in changes else None,
                            rpm_limit=changes.get("rpm_limit"), tpm_limit=changes.get("tpm_limit"))
     if "models" in changes:
         k.allowed_models = changes.pop("models")
@@ -154,7 +165,8 @@ def rotate_key(key_id: uuid.UUID, actor: User = Depends(current_user), db: DBSes
 
         remaining_days = max(1, (as_utc(k.expires_at) - utcnow()).days + 1)
     new_id = litellm.generate_key(
-        key=secret, alias=f"{actor.email}:{k.name}", models=list(k.allowed_models),
+        key=secret, alias=f"{actor.email}:{k.name}:{uuid.uuid4().hex[:8]}",  # old key still exists here
+        models=_litellm_names(db, list(k.allowed_models)),
         duration=f"{remaining_days}d", rpm=k.rpm_limit, tpm=k.tpm_limit,
         metadata={"nexora_user_id": str(actor.id), "nexora_project_id": str(k.project_id or "")},
     )

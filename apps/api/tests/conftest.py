@@ -155,6 +155,9 @@ def world(app_):
 class FakeLiteLLM:
     def __init__(self):
         self.calls: list[dict] = []
+        self.keys: dict[str, list[str]] = {}  # issued virtual key -> allowed model names
+        self.aliases: dict[str, str] = {}  # key_alias -> key (real LiteLLM: aliases must be unique)
+        self.tokens: dict[str, str] = {}  # hashed token -> key
         self.down = False
         self.gate = None  # asyncio.Event: inference calls wait on it until set
         self.inflight = 0
@@ -170,10 +173,30 @@ class FakeLiteLLM:
         body = json.loads(req.content) if req.content else {}
         self.calls.append({"path": req.url.path, "auth": req.headers.get("authorization"), "body": body})
         if req.url.path == "/key/generate":
-            return httpx.Response(200, json={"key": body["key"], "token": "hash-" + body["key"][-8:]})
-        if req.url.path in ("/key/update", "/key/delete"):
+            alias = body.get("key_alias")
+            if alias and alias in self.aliases:
+                return httpx.Response(400, json={"error": {"message": f"Key with alias '{alias}' already exists."}})
+            self.keys[body["key"]] = body.get("models", [])
+            tok = "hash-" + body["key"][-8:]
+            self.tokens[tok] = body["key"]
+            if alias:
+                self.aliases[alias] = body["key"]
+            return httpx.Response(200, json={"key": body["key"], "token": tok})
+        if req.url.path == "/key/delete":
+            for ident in body.get("keys", []):
+                key = self.tokens.get(ident, ident)
+                self.keys.pop(key, None)
+                self.aliases = {a: k for a, k in self.aliases.items() if k != key}
+            return httpx.Response(200, json={})
+        if req.url.path == "/key/update":
             return httpx.Response(200, json={})
         if req.url.path.endswith("/completions"):
+            # Like real LiteLLM: the key's model list is checked against the model in the request.
+            caller = (req.headers.get("authorization") or "").removeprefix("Bearer ")
+            if caller.startswith("sk-nx-") and caller not in self.keys:
+                return httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+            if caller in self.keys and body.get("model") not in self.keys[caller]:
+                return httpx.Response(401, json={"error": {"message": "key not allowed to access model"}})
             if body.get("stream"):
                 # A real stream (not pre-read content) so the proxy's streaming path is exercised.
                 return httpx.Response(200, headers={"content-type": "text/event-stream"},

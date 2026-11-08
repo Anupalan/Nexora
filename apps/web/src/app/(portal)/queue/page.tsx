@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Badge, EmptyState, Err, PageHeader } from "@/components/ui";
+import { IconQueue } from "@/components/icons";
 import { api, ApiError, type QueueItem } from "@/lib/api";
 import { useUser } from "@/lib/session";
 
@@ -33,35 +35,34 @@ export default function Queue() {
   }
   return (
     <>
-      <h1>Request Queue</h1>
-      {error && <p className="err">{error}</p>}
-      <div className="card" style={{ marginBottom: "1rem" }}>
-        <b>My pending requests</b>
-        {mine.length === 0 ? <p className="muted">Nothing queued or running.</p> : (
-          <table>
+      <PageHeader title="Request Queue" subtitle="Requests are admitted first-in, first-out per model. Waiting never holds a GPU slot." />
+      <Err>{error}</Err>
+      <div className="card flush" style={{ marginBottom: 14 }}>
+        <div className="card-head">My pending requests</div>
+        {mine.length === 0 ? <EmptyState icon={<IconQueue />} title="Nothing queued or running" /> : (
+          <div className="table-wrap"><table>
             <thead><tr><th>Request</th><th>Status</th><th>Submitted</th><th /></tr></thead>
             <tbody>{mine.map((r) => (
-              <tr key={r.id}><td><code>{r.id.slice(0, 8)}</code></td><td><span className="badge">{r.status}</span></td>
+              <tr key={r.id}><td><code>{r.id.slice(0, 8)}</code></td><td><Badge value={r.status} /></td>
                 <td className="muted">{new Date(r.created_at).toLocaleTimeString()}</td>
-                <td><button className="ghost" onClick={() => cancel(r.id)}>Cancel</button></td></tr>
+                <td className="actions"><button className="danger sm" onClick={() => cancel(r.id)}>Cancel</button></td></tr>
             ))}</tbody>
-          </table>
+          </table></div>
         )}
       </div>
       {overview && (
-        <div className="card">
-          <b>Deployments</b>
-          <p className="muted">FIFO is guaranteed within each deployment&apos;s queue (not across models).</p>
-          <table>
+        <div className="card flush">
+          <div className="card-head">Deployments <span className="muted" style={{ fontWeight: 400 }}>FIFO within each deployment&apos;s queue, not across models</span></div>
+          <div className="table-wrap"><table>
             <thead><tr><th>Model</th><th>Queued</th><th>Active</th><th>Max active</th><th>Max queue</th></tr></thead>
             <tbody>{overview.deployments.map((d) => (
               <tr key={d.deployment_id}><td>{d.model}</td><td>{d.queued}</td><td>{d.active}</td>
                 <td>{d.config.max_active_requests ?? "default"}{" "}
-                  <button className="ghost" onClick={() => setLimit(d.deployment_id, "max_active_requests", d.config.max_active_requests)}>Edit</button></td>
+                  <button className="ghost sm" onClick={() => setLimit(d.deployment_id, "max_active_requests", d.config.max_active_requests)}>Edit</button></td>
                 <td>{d.config.max_queue_length ?? "default"}{" "}
-                  <button className="ghost" onClick={() => setLimit(d.deployment_id, "max_queue_length", d.config.max_queue_length)}>Edit</button></td></tr>
+                  <button className="ghost sm" onClick={() => setLimit(d.deployment_id, "max_queue_length", d.config.max_queue_length)}>Edit</button></td></tr>
             ))}</tbody>
-          </table>
+          </table></div>
         </div>
       )}
     </>

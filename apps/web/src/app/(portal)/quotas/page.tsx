@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { EmptyState, Err, Loading, PageHeader } from "@/components/ui";
+import { IconGauge } from "@/components/icons";
 import { api, ApiError, type QuotaRow } from "@/lib/api";
 
 const FIELDS = ["requests_per_minute", "requests_per_day", "requests_per_month", "tokens_per_minute",
@@ -29,26 +31,24 @@ export default function Quotas() {
   }
   return (
     <>
-      <h1>Quota Policies</h1>
-      <p className="muted">A request must pass every applicable scope, so the most restrictive limit wins.
-        Blank = unlimited. Concurrency counts queued + running requests.</p>
-      <form className="row" onSubmit={create}>
+      <PageHeader title="Quota Policies" subtitle="A request must pass every applicable scope, so the most restrictive limit wins. Blank means unlimited; concurrency counts queued and running requests." />
+      <form className="card form-card" onSubmit={create}><div className="row">
         <label>Scope<select name="scope_type" defaultValue="user">
           {["global", "team", "user", "key", "project"].map((s) => <option key={s}>{s}</option>)}</select></label>
         <label>Scope ID (UUID)<input name="scope_id" placeholder="not needed for global" /></label>
         {FIELDS.map((k) => <label key={k}>{k.replace(/_/g, " ")}<input name={k} type="number" min={1} style={{ width: 110 }} /></label>)}
         <button>Create</button>
-      </form>
-      {error && <p className="err">{error}</p>}
-      <div className="card" style={{ overflowX: "auto" }}>
-        {rows === null ? <p className="muted">Loading…</p> : rows.length === 0 ? <p className="muted">No quotas set.</p> : (
-          <table>
+      </div></form>
+      <Err>{error}</Err>
+      <div className="card flush">
+        {rows === null ? <Loading /> : rows.length === 0 ? <EmptyState icon={<IconGauge />} title="No quotas set" hint="Without a quota, requests are limited only by the queue." /> : (
+          <div className="table-wrap"><table>
             <thead><tr><th>Scope</th>{FIELDS.map((k) => <th key={k}>{k.replace(/_/g, " ")}</th>)}</tr></thead>
             <tbody>{rows.map((q) => (
               <tr key={q.id}><td>{q.scope_type}<br /><span className="muted">{q.scope_id.slice(0, 8)}</span></td>
                 {FIELDS.map((k) => <td key={k}><a href="#" onClick={(e) => { e.preventDefault(); edit(q, k); }}>{q[k] ?? "∞"}</a></td>)}</tr>
             ))}</tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </>

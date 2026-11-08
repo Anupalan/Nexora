@@ -3,6 +3,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError, type Team } from "@/lib/api";
 import { useUser } from "@/lib/session";
+import { Badge, EmptyState, Err, Loading, PageHeader } from "@/components/ui";
+import { IconTeam } from "@/components/icons";
 
 export default function Teams() {
   const user = useUser();
@@ -22,25 +24,24 @@ export default function Teams() {
   }
   return (
     <>
-      <h1>Teams</h1>
+      <PageHeader title="Teams" subtitle="Teams own projects and can be given their own quotas." />
       {user.role === "super_admin" && (
-        <form className="row" onSubmit={create}>
-          <label>New team<input name="name" required /></label>
-          <button>Create</button>
-          {error && <span className="err">{error}</span>}
+        <form className="card form-card" onSubmit={create}>
+          <div className="row"><label>New team<input name="name" required placeholder="Platform" /></label><button>Create team</button></div>
         </form>
       )}
-      <div className="card">
-        {rows === null ? <p className="muted">Loading…</p> : rows.length === 0 ? (
-          <p className="muted">You are not in any team yet.</p>
+      <Err>{error}</Err>
+      <div className="card flush">
+        {rows === null ? <Loading /> : rows.length === 0 ? (
+          <EmptyState icon={<IconTeam />} title="No teams yet" hint="You are not in any team." />
         ) : (
-          <table>
+          <div className="table-wrap"><table>
             <thead><tr><th>Name</th><th>Status</th><th>Created</th></tr></thead>
             <tbody>{rows.map((t) => (
-              <tr key={t.id}><td>{t.name}</td><td><span className="badge">{t.status}</span></td>
+              <tr key={t.id}><td><b>{t.name}</b></td><td><Badge value={t.status} /></td>
                 <td className="muted">{new Date(t.created_at).toLocaleDateString()}</td></tr>
             ))}</tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </>

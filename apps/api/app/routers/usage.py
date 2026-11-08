@@ -159,10 +159,10 @@ def _history_item(r: InferenceRequest, alias: str) -> dict:
 
 @router.get("/requests")
 def request_history(f: Filters = Depends(filters), limit: int = Query(50, ge=1, le=200),
-                    offset: int = Query(0, ge=0), actor: User = Depends(current_user),
-                    db: DBSession = Depends(get_db)):
+                    offset: int = Query(0, ge=0), mine: bool = False,
+                    actor: User = Depends(current_user), db: DBSession = Depends(get_db)):
     q = (select(InferenceRequest, Model.model_alias).join(Model, Model.id == InferenceRequest.model_id)
-         .where(and_(*_conditions(db, actor, f))).order_by(InferenceRequest.created_at.desc(),
+         .where(and_(*_conditions(db, actor, f, only_self=mine))).order_by(InferenceRequest.created_at.desc(),
                                                             InferenceRequest.id).limit(limit).offset(offset))
     return [_history_item(r, a) for r, a in db.execute(q).all()]
 
@@ -178,9 +178,9 @@ CSV_COLUMNS = ["id", "created_at", "model", "project_id", "api_key_id", "source"
 
 
 @router.get("/export")
-def export_csv(f: Filters = Depends(filters), actor: User = Depends(current_user),
-               db: DBSession = Depends(get_db)):
-    rows = _rows(db, _conditions(db, actor, f))
+def export_csv(f: Filters = Depends(filters), mine: bool = False,
+               actor: User = Depends(current_user), db: DBSession = Depends(get_db)):
+    rows = _rows(db, _conditions(db, actor, f, only_self=mine))
 
     def gen():
         buf = io.StringIO()

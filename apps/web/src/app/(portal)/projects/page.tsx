@@ -2,24 +2,26 @@
 
 import { useEffect, useState } from "react";
 import { api, type Project } from "@/lib/api";
+import { Badge, EmptyState, Loading, PageHeader } from "@/components/ui";
+import { IconFolder } from "@/components/icons";
 
 export default function Projects() {
   const [rows, setRows] = useState<Project[] | null>(null);
   useEffect(() => { api<Project[]>("/projects").then(setRows).catch(() => setRows([])); }, []);
   return (
     <>
-      <h1>Projects</h1>
-      <div className="card">
-        {rows === null ? <p className="muted">Loading…</p> : rows.length === 0 ? (
-          <p className="muted">No projects you can access yet.</p>
+      <PageHeader title="Projects" subtitle="Projects you own or have been given access to." />
+      <div className="card flush">
+        {rows === null ? <Loading /> : rows.length === 0 ? (
+          <EmptyState icon={<IconFolder />} title="No projects yet" hint="Ask a team admin to add you to a project." />
         ) : (
-          <table>
+          <div className="table-wrap"><table>
             <thead><tr><th>Name</th><th>Repository</th><th>Branch</th><th>Status</th></tr></thead>
             <tbody>{rows.map((p) => (
-              <tr key={p.id}><td>{p.name}</td><td className="muted">{p.repository_url ?? "—"}</td>
-                <td>{p.default_branch}</td><td><span className="badge">{p.status}</span></td></tr>
+              <tr key={p.id}><td><b>{p.name}</b></td><td className="muted">{p.repository_url ?? "—"}</td>
+                <td><code>{p.default_branch}</code></td><td><Badge value={p.status} /></td></tr>
             ))}</tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </>

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { Badge, EmptyState, Err, Loading, PageHeader } from "@/components/ui";
+import { IconKey } from "@/components/icons";
 import { api, ApiError, type ApiKeyCreated, type ApiKeyInfo, type ModelInfo, type Project } from "@/lib/api";
 
 /** OpenCode custom-provider config for an OpenAI-compatible endpoint. */
@@ -65,9 +67,9 @@ export default function Keys() {
 
   return (
     <>
-      <h1>API Keys</h1>
+      <PageHeader title="API Keys" subtitle="Personal keys for OpenAI-compatible clients such as OpenCode, Cline, Goose and Aider." />
       {secret && (
-        <div className="card" style={{ marginBottom: "1rem" }}>
+        <div className="notice">
           <b>Copy your key now — it will not be shown again.</b>
           <p><code>{secret.key}</code>{" "}
             <button className="ghost" onClick={() => copy(secret.key)}>{copied ? "Copied" : "Copy"}</button></p>
@@ -78,7 +80,7 @@ export default function Keys() {
           <button className="ghost" onClick={() => setSecret(null)}>I have saved it</button>
         </div>
       )}
-      <form className="row" onSubmit={create}>
+      <form className="card form-card" onSubmit={create}><div className="row">
         <label>Name<input name="name" required placeholder="laptop" /></label>
         <label>Project<select name="project_id" defaultValue="">
           <option value="">— none —</option>
@@ -87,13 +89,13 @@ export default function Keys() {
           {models.map((m) => <option key={m.id} value={m.model_alias}>{m.model_alias}</option>)}</select></label>
         <label>Expires (days)<input name="days" type="number" min={1} max={365} defaultValue={90} /></label>
         <button>Create key</button>
-      </form>
-      {error && <p className="err" role="alert">{error}</p>}
-      <div className="card">
-        {keys === null ? <p className="muted">Loading…</p> : keys.length === 0 ? (
-          <p className="muted">No keys yet.</p>
+      </div></form>
+      <Err>{error}</Err>
+      <div className="card flush">
+        {keys === null ? <Loading /> : keys.length === 0 ? (
+          <EmptyState icon={<IconKey />} title="No keys yet" hint="Create one above to connect a client." />
         ) : (
-          <table>
+          <div className="table-wrap"><table>
             <thead><tr><th>Name</th><th>Key</th><th>Models</th><th>Expires</th><th>Last used</th><th>Status</th><th /></tr></thead>
             <tbody>{keys.map((k) => (
               <tr key={k.id}>
@@ -101,13 +103,13 @@ export default function Keys() {
                 <td className="muted">{k.allowed_models.join(", ")}</td>
                 <td className="muted">{k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "never"}</td>
                 <td className="muted">{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}</td>
-                <td><span className="badge">{k.status}</span></td>
-                <td>{k.status === "active" && <>
-                  <button className="ghost" onClick={() => act(k, "rotate")}>Rotate</button>{" "}
-                  <button className="ghost" onClick={() => act(k, "revoke")}>Revoke</button></>}</td>
+                <td><Badge value={k.status} /></td>
+                <td className="actions">{k.status === "active" && <span className="actions-inline">
+                  <button className="ghost sm" onClick={() => act(k, "rotate")}>Rotate</button>
+                  <button className="danger sm" onClick={() => act(k, "revoke")}>Revoke</button></span>}</td>
               </tr>
             ))}</tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </>

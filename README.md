@@ -29,6 +29,35 @@ cd apps/web && pnpm install && pnpm dev
 Tests: `cd apps/api && .venv/bin/pytest` (SQLite database; needs `redis-server` on PATH, or set
 `TEST_REDIS_URL`, because the Lua-based reservation/queue logic is tested against a real Redis).
 
+## Local end-to-end demo (roadmap §51)
+`infra/mock-llm` is a mock LiteLLM + vLLM (virtual keys with model allow-lists, streaming, usage) for
+local work: `cd infra/mock-llm && MOCK_MASTER_KEY=dev uvicorn server:app --port 4000` (run the API with
+`LITELLM_MASTER_KEY=dev`). With web, API, Postgres, Redis and the mock running,
+`apps/api/.venv/bin/python tests/e2e/demo.py` walks the 18-step workflow: admin creates team, developer,
+project and quotas; the developer gets a key and uses it through `/v1` (chat and streaming); usage shows
+up for the developer and the admin; the next request over quota is rejected with a clear 429. The mock
+is not a faithful LiteLLM: the same flow must still be validated against the real proxy and vLLM.
+Register models with LiteLLM's `model_name` (not the `openai/...` provider path) as the model's
+"LiteLLM model": Nexora creates keys in LiteLLM with those names.
+
+## Running against the real LiteLLM proxy
+Validated against LiteLLM 1.108.3 (virtual-key create/update/delete by hashed id, per-key model
+allow-lists, streaming with usage). Setup in a separate venv (outside this repo):
+```bash
+python3 -m venv ~/litellm-venv && ~/litellm-venv/bin/pip install 'litellm[proxy,extra_proxy]'
+createdb litellm_dev
+SCHEMA=$(~/litellm-venv/bin/python -c "import litellm.proxy,os;print(os.path.join(os.path.dirname(litellm.proxy.__file__),'schema.prisma'))")
+PATH=~/litellm-venv/bin:$PATH DATABASE_URL=postgresql://$USER@localhost/litellm_dev ~/litellm-venv/bin/prisma generate --schema "$SCHEMA"
+# backend: the mock acting as vLLM on :4000, then LiteLLM on :4100 (first start applies ~220 DB migrations)
+(cd infra/mock-llm && MOCK_OPEN=1 uvicorn server:app --port 4000) &
+LITELLM_MASTER_KEY=sk-dev-master LITELLM_DATABASE_URL=postgresql://$USER@localhost/litellm_dev \
+  ~/litellm-venv/bin/litellm --config infra/litellm/config.local.yaml --port 4100
+```
+Run the API with `LITELLM_BASE_URL=http://localhost:4100 LITELLM_MASTER_KEY=sk-dev-master`. Things the
+real proxy taught us, now covered by tests: LiteLLM requires **unique key aliases** (Nexora suffixes
+them), and checks a key's model list against the **model_name** in each request (Nexora creates keys
+with the model's LiteLLM name, not its alias).
+
 ## Phase 3 status
 Done:
 - **Quotas** (global / team / user / key / project): requests and tokens per minute, day and month,
